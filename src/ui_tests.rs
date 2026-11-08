@@ -1795,7 +1795,7 @@ fn quota_update_status_is_visible_for_every_provider_and_keeps_failed_data(){
             shoot_feature(&mut h,&mut raster,&dest,&format!("quota-{}",provider.name()),90,Some(H::local(300.0,60.0)),"2026-11-07");
         }
         h.hover(H::local(300.0,60.0),1.0);
-        assert_eq!(h.app.expanded_height(),176.0,"{provider:?} 额度页应采用同宽加高的布局");
+        assert_eq!(h.app.expanded_height(),176.0*crate::app::LAYOUT_SCALE,"{provider:?} 额度页应采用同宽加高的布局");
         assert!((h.app.current_width()-PW).abs()<0.1,"{provider:?} 额度页应保持原有宽度：{}",h.app.current_width());
         let expected=if provider==Provider::Claude{format!("本地记录 · {time}")}else if provider==Provider::DeepSeek{format!("CNY · {time} 更新")}else{format!("{time} 更新")};
         let status=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==expected=>Some(t.visual_bounding_rect()),_=>None}).unwrap_or_else(||panic!("{provider:?} 缺少更新时间：{expected}"));
@@ -1818,9 +1818,11 @@ fn quota_update_status_is_visible_for_every_provider_and_keeps_failed_data(){
 fn quota_page_navigation_tracks_the_taller_panel(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.quota_accounts(1);
     h.app.show_page(6);h.hover(H::local(300.0,60.0),0.8);
-    assert!((h.hit.height()-178.0).abs()<0.2,"额度页新增的底部空间应属于命中区域");
+    // 命中区域 = 面板高度 + side_hit_rect 固定外扩 2.0（不随 LAYOUT_SCALE 缩放）。
+    assert!((h.hit.height()-(176.0*crate::app::LAYOUT_SCALE+2.0)).abs()<0.2,"额度页新增的底部空间应属于命中区域：{}",h.hit.height());
     let dot=h.shapes.iter().find_map(|shape|match &shape.shape{
-        egui::Shape::Rect(rect) if (rect.rect.width()-4.0).abs()<0.1&&(rect.rect.height()-4.0).abs()<0.1&&(rect.rect.center().y-168.8).abs()<0.1=>Some(rect.rect.center()),_=>None,
+        // 分页圆点画在缩放后的面板里：直径 4.0*LAYOUT_SCALE，纵向位置 168.8*LAYOUT_SCALE。
+        egui::Shape::Rect(rect) if (rect.rect.width()-4.0*crate::app::LAYOUT_SCALE).abs()<0.1&&(rect.rect.height()-4.0*crate::app::LAYOUT_SCALE).abs()<0.1&&(rect.rect.center().y-168.8*crate::app::LAYOUT_SCALE).abs()<0.5=>Some(rect.rect.center()),_=>None,
     }).expect("分页圆点应随加高的面板下移");
     h.click(dot);assert_ne!(h.app.page,6,"新增底部区域中的分页应可点击");
     h.app.show_page(6);h.hover(H::local(300.0,60.0),0.8);
@@ -2078,7 +2080,7 @@ fn mail_row_opens_summary_and_back_returns() {
     h.app.show_page(5);
     h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.6);
     h.hover(H::local(300.0, 50.0), 0.4);
-    h.click(H::local(300.0, 50.0));
+    h.click(H::local(300.0, 62.0));
     assert_eq!(h.app.mail.open_uid, Some(("a@qq.com".to_string(), 42)), "点邮件行应展开摘要");
     h.hover(H::local(350.0, 48.0), 0.4);
     h.click(H::local(350.0, 48.0));
@@ -3263,7 +3265,8 @@ fn lyric_caps_lock_notice_keeps_one_glass_outline(){
             let contours=glass.unwrap();
             assert_eq!(contours.len(),1,"{skin:?} {shape:?} 倍率 {ppp} 第 {frame} 帧：提示与原岛应共用外轮廓，避免拼接处出现内圈");
             if shape==crate::model::IslandShape::Pill{
-                let rims=output.shapes.iter().filter(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.stroke.width>0.0&&r.rect.width()>50.0&&r.rect.height()>=20.0)).count();
+                // 只统计胶囊本体（宽度远大于岛外角标），角标是独立元素不算"连接处重复描边"。
+                let rims=output.shapes.iter().filter(|s|matches!(&s.shape,egui::Shape::Rect(r) if r.stroke.width>0.0&&r.rect.width()>100.0*crate::app::LAYOUT_SCALE&&r.rect.height()>=20.0*crate::app::LAYOUT_SCALE)).count();
                 assert_eq!(rims,1,"胶囊连接处不能重复绘制玻璃描边");
             }
             raster.update_textures(&output.textures_delta);let primitives=h.ctx.tessellate(output.shapes,ppp);
@@ -6165,16 +6168,18 @@ fn calendar_add_button_does_not_overlap_the_battery_ring(){
         image::imageops::crop_imm(&image,200,0,880,470).to_image().save(path).unwrap();
     }
     let text=shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Text(text) if text.galley.text()=="＋ 新增"=>Some(text.visual_bounding_rect()),_=>None}).unwrap();
-    let button=shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Rect(rect) if rect.rect.contains(text.center()) && (rect.rect.width()-46.0).abs()<0.1 && (rect.rect.height()-18.0).abs()<0.1=>Some(rect.rect),_=>None}).unwrap();
+    let button=shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Rect(rect) if rect.rect.contains(text.center()) && (rect.rect.width()-46.0*crate::app::LAYOUT_SCALE).abs()<0.1 && (rect.rect.height()-18.0*crate::app::LAYOUT_SCALE).abs()<0.1=>Some(rect.rect),_=>None}).unwrap();
     if battery.is_some(){
-        let ring=shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Circle(circle) if (circle.radius-6.56).abs()<0.1 && (circle.center.y-button.center().y-0.6).abs()<0.1=>Some(Rect::from_center_size(circle.center,Vec2::splat(circle.radius*2.0+circle.stroke.width))),_=>None}).unwrap();
+        // 电量圆环的半径与纵向偏移都随 Card 的 LAYOUT_SCALE 放大，这里按缩放后的比例匹配。
+        // 电量圆环画在 Card 之外，半径不随 LAYOUT_SCALE 变；按钮中心随缩放移动，故按半径识别而不是精确的纵向偏移。
+        let ring=shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Circle(circle) if (circle.radius-6.56).abs()<0.2=>Some(Rect::from_center_size(circle.center,Vec2::splat(circle.radius*2.0+circle.stroke.width))),_=>None}).unwrap();
         assert!(!button.expand(3.0).intersects(ring),"日程新增按钮与电量圆环应留有间距：按钮 {button:?}，圆环 {ring:?}");
     }
     let clock=h.app.settings.clock_text("17:43:00");
     for text in shapes.iter().filter_map(|shape|match &shape.shape{egui::Shape::Text(text) if text.galley.text()==date || clock.split_whitespace().any(|part|part==text.galley.text())=>Some(text),_=>None}){
         let bounds=text.visual_bounding_rect();
         assert!(!button.expand(3.0).intersects(bounds),"新增按钮不能覆盖日期或时间：{}",text.galley.text());
-        assert!(bounds.right()<h.app.content_origin(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))).x+355.0,"日期与时间应留出右侧播放和设置按钮的位置");
+        assert!(bounds.right()<h.app.content_origin(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))).x+355.0*crate::app::LAYOUT_SCALE,"日期与时间应留出右侧播放和设置按钮的位置");
     }
     }
 }

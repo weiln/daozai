@@ -1652,10 +1652,9 @@ impl App {
             } else if scroll!=0.0 {
                 let cr=env.cursor.unwrap()-self.content_origin(win).to_vec2();
                 let cursor=Pos2::new(cr.x/LAYOUT_SCALE, cr.y/LAYOUT_SCALE);
-                let mail_body=self.page==5 && self.mail.open_uid.is_some()
-                    && Rect::from_min_max(Pos2::new(46.0,104.0),Pos2::new(374.0,194.0)).contains(cursor);
+                let mail_reading=self.page==5 && self.mail.open_uid.is_some();
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                if mail_body || mail_list {self.wheel_delta=0.0;}
+                if mail_reading || mail_list {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
