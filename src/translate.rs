@@ -288,9 +288,11 @@ fn resolve_key(_endpoint: &Endpoint) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------- 调用
-fn request(agent: &ureq::Agent, endpoint: &Endpoint, key: &str, direction: Direction, text: &str) -> Result<String, String> {
+fn request(endpoint: &Endpoint, key: &str, direction: Direction, text: &str) -> Result<String, String> {
     let url = endpoint.chat_url();
     ensure_http(&url)?;
+    // 按目标地址选代理：内网/NO_PROXY 主机直连，避免被 MITM 代理改写协议后回 500。
+    let agent = crate::quota::http_agent_for(&url);
     let body = serde_json::json!({
         "model": endpoint.model,
         "stream": false,
@@ -325,6 +327,7 @@ fn request(agent: &ureq::Agent, endpoint: &Endpoint, key: &str, direction: Direc
 }
 
 /// 取错误响应里的 `error.message` 作为补充说明（最多 120 字）。
+/// 非 JSON 响应（如本地代理的错误页）会给出可操作的提示，而不是空白。
 fn http_error_detail(response: ureq::Response) -> String {
     let mut raw = String::new();
     use std::io::Read;
@@ -333,8 +336,30 @@ fn http_error_detail(response: ureq::Response) -> String {
     }
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
     let message = v.pointer("/error/message").and_then(|m| m.as_str()).or_else(|| v.get("message").and_then(|m| m.as_str())).unwrap_or("");
-    let message: String = message.chars().take(120).collect();
-    if message.is_empty() { String::new() } else { format!("：{message}") }
+    if !message.is_empty() {
+        let message: String = message.chars().take(120).collect();
+        return format!("：{message}");
+    }
+    proxy_error_hint(&raw)
+}
+
+/// 识别本地代理（DevSidecar / 系统代理）返回的错误页，给出直连建议。
+fn proxy_error_hint(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let proxy_like = lower.contains("devsidecar")
+        || lower.contains("wrong_version_number")
+        || lower.contains("eProto".to_ascii_lowercase().as_str())
+        || lower.contains("proxy error");
+    if proxy_like {
+        return "：请求被本地代理拦截（代理把 http 改写为 https 导致握手失败）。请在 NO_PROXY 中加入该域名，或在代理软件里放行内网域名".into();
+    }
+    // 仍拿不到 JSON 时，退化为截断的原文片段，便于用户排查。
+    let text = raw.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    let snippet: String = text.chars().take(120).collect();
+    format!("：{}", snippet.replace(['\n', '\r'], " "))
 }
 
 /// 一次翻译请求的后台任务。
@@ -357,7 +382,7 @@ impl Translate {
                     let text = validate(&text)?;
                     let direction = resolve(direction, &text);
                     let key = resolve_key(&endpoint)?;
-                    request(&crate::quota::http_agent(), &endpoint, &key, direction, &text)
+                    request(&endpoint, &key, direction, &text)
                 })();
                 let _ = tx.send(result);
             })

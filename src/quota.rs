@@ -326,11 +326,43 @@ impl Service {
         None
     }
 }
-pub(crate) fn http_agent()->ureq::Agent{
+pub(crate) fn http_agent()->ureq::Agent{http_agent_for("")}
+/// 与 http_agent 相同，但可针对目标 URL 决定是否绕过代理。
+/// 内网/私有地址与 `NO_PROXY` 命中的主机直连：企业网关常是明文 HTTP，
+/// 经 MITM 代理会被改写协议并回 500（DevSidecar 的 EPROTO/WRONG_VERSION_NUMBER）。
+pub(crate) fn http_agent_for(target:&str)->ureq::Agent{
     let mut builder=ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).redirects(0);
-    let proxy=["HTTPS_PROXY","https_proxy","ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy"].iter().find_map(|key|std::env::var(key).ok().filter(|s|!s.is_empty())).or_else(system_proxy);
-    if let Some(proxy)=proxy.and_then(|s|ureq::Proxy::new(s).ok()){builder=builder.proxy(proxy);}
+    if !proxy_bypassed(target){
+        let proxy=["HTTPS_PROXY","https_proxy","ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy"].iter().find_map(|key|std::env::var(key).ok().filter(|s|!s.is_empty())).or_else(system_proxy);
+        if let Some(proxy)=proxy.and_then(|s|ureq::Proxy::new(s).ok()){builder=builder.proxy(proxy);}
+    }
     builder.build()
+}
+/// 该目标是否应直连（命中 NO_PROXY / no_proxy，或属于内网/私有网段）。
+pub(crate) fn proxy_bypassed(target:&str)->bool{
+    let host=host_of(target);
+    if host.is_empty(){return false;}
+    for key in ["NO_PROXY","no_proxy"]{
+        let Ok(list)=std::env::var(key) else { continue };
+        let hit=list.split(',').map(str::trim).filter(|s|!s.is_empty()).any(|pat|{
+            if pat=="*"{return true;}
+            let pat=pat.trim_start_matches('.').to_ascii_lowercase();
+            host==pat || host.ends_with(&format!(".{pat}"))
+        });
+        if hit{return true;}
+    }
+    is_private_host(&host)
+}
+fn host_of(url:&str)->String{
+    url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("")
+        .rsplit('@').next().unwrap_or("")
+        .split(':').next().unwrap_or("").trim().to_ascii_lowercase()
+}
+/// localhost、回环、私有网段、内网后缀（.local/.lan/.corp）。公司内网域名需用 NO_PROXY 显式指定。
+pub(crate) fn is_private_host(host:&str)->bool{
+    if host=="localhost" || host.ends_with(".localhost") || host.ends_with(".local") || host.ends_with(".lan") || host.ends_with(".corp"){return true;}
+    if let Ok(ip)=host.parse::<std::net::IpAddr>(){return match ip{std::net::IpAddr::V4(v)=>v.is_loopback()||v.is_private()||v.is_link_local(),std::net::IpAddr::V6(v)=>v.is_loopback()};}
+    false
 }
 #[cfg(not(windows))] pub(crate) fn system_proxy()->Option<String>{None}
 #[cfg(windows)] pub(crate) fn system_proxy()->Option<String>{
@@ -488,5 +520,24 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
         assert!(parse(Provider::Kimi,&json!({})).unwrap_err().contains("已登录"));
     }
     #[test] fn claude_null_window_and_kimi_string_numbers(){let c=parse(Provider::Claude,&json!({"five_hour":null,"seven_day":{"utilization":60,"resets_at":"2030-01-01T12:00:00Z"}})).unwrap();assert_eq!(c.rings().len(),1);assert!(c.windows[0].reset.is_some());let k=parse(Provider::Kimi,&json!({"usage":{"limit":"100","remaining":"70"},"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"20","used":"5"}}]})).unwrap();assert_eq!(k.rings().len(),2);assert_eq!(k.rings()[0].remaining,75.0);}
+    #[test] fn proxy_bypass_targets_internal_and_no_proxy_hosts(){
+        assert!(is_private_host("localhost"));
+        assert!(is_private_host("127.0.0.1"));
+        assert!(is_private_host("10.1.2.3"));
+        assert!(is_private_host("192.168.1.9"));
+        assert!(is_private_host("172.16.0.1"));
+        assert!(is_private_host("build.corp"));
+        assert!(!is_private_host("api.deepseek.com"));
+        assert!(!is_private_host("lightcode-uis.hundsun.com"));
+        assert!(proxy_bypassed("http://127.0.0.1:8080/v1/chat/completions"));
+        assert!(proxy_bypassed("https://localhost:9000/x"));
+        assert!(!proxy_bypassed("https://api.deepseek.com/v1"));
+        // 公司内网域名：只能靠 NO_PROXY 显式放行。
+        std::env::set_var("NO_PROXY","lightcode-uis.hundsun.com,.hundsun.com");
+        assert!(proxy_bypassed("http://lightcode-uis.hundsun.com:8080/v1/chat/completions"));
+        std::env::set_var("NO_PROXY","*");
+        assert!(proxy_bypassed("https://api.deepseek.com/v1"));
+        std::env::remove_var("NO_PROXY");
+    }
     #[test] fn multi_account_config_keeps_sources_and_selection_separate(){let mut c=Config::default();for n in 1..=2{c.accounts.push(Account{id:n.to_string(),provider:Provider::Codex,alias:format!("账号 {n}"),source:PathBuf::from(format!("profile-{n}/auth.json")),slot:None,enabled:true,pinned:true});}c.selected="2".into();let raw=c.json();assert_eq!(Config::from_json(&raw),c);assert_eq!(c.selected_index(),Some(1));assert_eq!(c.pinned_indices(),vec![0,1]);assert!(!raw.to_string().contains("access_token"));}
 }
