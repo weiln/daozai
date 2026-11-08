@@ -153,8 +153,8 @@ impl Unread {
 pub(crate) const UNREAD_W: f32 = 40.0;
 pub(crate) const UNREAD_GAP: f32 = 8.0;
 pub(crate) const UNREAD_SLOT: f32 = 36.0;
-/// 收起时两个来源图标的间距：并排各占一格，不叠放。
-fn unread_step(_horizontal: bool) -> f32 { 22.0 }
+/// 收起时相邻来源图标中心距：每枚图标连它的红点各占一格，彼此不重叠。
+fn unread_step(_horizontal: bool) -> f32 { 28.0 }
 
 /// 交给外壳执行的副作用。
 #[derive(Clone, Debug, PartialEq)]
@@ -2017,7 +2017,8 @@ impl App {
     /// 收起时叠放区沿胶囊方向的长度。
     fn unread_stack_len(&self,horizontal:bool)->f32 {
         let icons=self.unread_sources().len().min(3) as f32;
-        32.0+unread_step(horizontal)*(icons-1.0)
+        // 每枚图标各自一格（图标 + 右上角红点），左右各留 6 的呼吸空间。
+        26.0+unread_step(horizontal)*(icons-1.0)+12.0
     }
 
     fn messenger_badge_rect(&self,win:Rect,panel:Rect)->Option<Rect>{
@@ -2044,7 +2045,7 @@ impl App {
         if scale<0.02 || self.open && (self.calendar.draft.is_some() || self.task_dialog.is_some()){return None;}
         let side_column=self.side() && self.notice.is_none();
         let length=self.unread_stack_len(!side_column);
-        let (width,height)=if side_column {(32.0,length)}else{(length,BAR_H)};
+        let (width,height)=if side_column {(unread_step(true)+12.0,length)}else{(length,BAR_H)};
         let (width,height)=(width*scale,height*scale);
         let (x,y)=if side_column {
             (panel.center().x-width/2.0,panel.bottom())
@@ -2074,9 +2075,10 @@ impl App {
             let u=self.pending_messengers[i];
             let cy=2.0+slot*(i as f32+0.5)-self.messenger_scroll;
             if cy< -slot || cy>height+slot {continue;}
-            let scale=if u.source==Messenger::Wechat {1.0}else{1.12};
+            let scale=if u.source==Messenger::Wechat {0.95}else{1.0};
             crate::extras::messenger_icon(&inner.scaled(x,cy,scale),x,cy,u.source);
-            inner.circle(x+10.0,cy-9.0,2.6,Color32::from_rgb(255,72,72));
+            // 红点贴在图标右上角，留一格空隙，不压住图标本体。
+            inner.circle(x+9.5,cy-9.5,3.0,Color32::from_rgb(255,59,48));
             if let Some(tag)=self.unread_tag(i){
                 inner.circle(x+10.0,cy+8.5,6.0,Color32::from_gray(238));
                 inner.centered_text(x+10.0,cy+8.5,&tag.to_string(),8.5,W::Bold,Color32::from_gray(28),H::Center);
@@ -2100,15 +2102,17 @@ impl App {
         // 最多并排显示三个来源（微信 / QQ / 钉钉）。
         let icons=sources.len().min(3);
         let step=unread_step(horizontal);
-        let at=|k:usize|if horizontal {(16.0+step*k as f32,14.0)}else{(16.0,14.0+step*k as f32)};
+        // 一行一枚图标：每格「图标 + 右上角红点」宽 28、高 26，左停靠时还要躲开细线的青色指示点（y≈9）。
+        let half=if horizontal {14.0}else{13.0};
+        let at=|k:usize|if horizontal {(6.0+half+step*k as f32,14.0)}else{(16.0,13.0+half+step*k as f32)};
         for k in 0..icons {
             let (x,y)=at(k);
-            let scale=if sources[k]==Messenger::Wechat {0.85}else{0.92};
+            let scale=if sources[k]==Messenger::Wechat {0.9}else{0.95};
             crate::extras::messenger_icon(&c.scaled(x,y,scale),x,y,sources[k]);
         }
         // 每个来源图标右上角一个小红点，不显示数字。
-        for k in 0..icons {let (x,y)=at(k);c.circle(x+8.0,y-7.0,2.6,Color32::from_rgb(255,59,48));}
-        let (w,h)=if horizontal {(self.unread_stack_len(true),BAR_H)}else{(32.0,self.unread_stack_len(false))};
+        for k in 0..icons {let (x,y)=at(k);c.circle(x+8.5,y-8.0,2.8,Color32::from_rgb(255,59,48));}
+        let (w,h)=if horizontal {(self.unread_stack_len(true),BAR_H)}else{(unread_step(true)+12.0,self.unread_stack_len(false))};
         if count==1 {
             let u=self.pending_messengers[0];
             let button=c.hit(0.0,0.0,w,h,u.source.name()).on_hover_text(format!("查看{}",u.source.name()));

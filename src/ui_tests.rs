@@ -5992,44 +5992,40 @@ fn unread_gallery(){
     use crate::app::Messenger;
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_FEATURE_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    // 三个来源都打开：微信 / QQ / 钉钉。
     let fill=|h:&mut H,n:usize|{
-        h.app.settings.wechat_notifications=true;h.app.settings.read_notifications=true;h.app.settings.pet=false;
-        let all=[(Messenger::Wechat,101),(Messenger::Qq,0),(Messenger::Wechat,202),(Messenger::Wechat,303),(Messenger::Qq,0)];
+        h.app.settings.wechat_notifications=true;h.app.settings.read_notifications=true;h.app.settings.dingtalk_notifications=true;h.app.settings.notifications=true;h.app.settings.pet=false;
+        let all=[(Messenger::Wechat,101),(Messenger::Qq,0),(Messenger::DingTalk,404),(Messenger::Wechat,202),(Messenger::Wechat,303),(Messenger::Qq,0)];
         for (source,pid) in all.into_iter().take(n){
-            if source==Messenger::Wechat {h.app.receive_wechat_reminder_from(pid,0);} else {h.app.receive_notification("QQ".into(),"QQ".into(),"测试".into());}
+            match source {
+                Messenger::Wechat=>h.app.receive_wechat_reminder_from(pid,0),
+                Messenger::DingTalk=>h.app.receive_dingtalk_reminder_from(pid,0),
+                Messenger::Qq=>h.app.receive_notification("QQ".into(),"QQ".into(),"测试".into()),
+            }
         }
         h.app.alerts.clear();h.app.notice=None;h.app.notification_bell_until=0.0;
     };
     for dock in [crate::model::Dock::Top,crate::model::Dock::Left,crate::model::Dock::Right]{
         let key=dock.key();
-        for n in [1,2,3,4]{
+        for n in [1,2,3,4,6]{
             let mut h=H::new();h.app.settings.dock=dock;fill(&mut h,n);
             let side=dock.is_side();
             let (w,hgt)=if side {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,WIN_H)};
             let mut r=if side {feature_raster_sized(w,hgt)} else {feature_raster()};
             let away=Some(Pos2::new(if side {w/2.0} else {WIN_W/2.0},hgt-6.0));
-            let near=if dock==crate::model::Dock::Left {Pos2::new(8.0,hgt/2.0)} else if dock==crate::model::Dock::Right {Pos2::new(w-8.0,hgt/2.0)} else {Pos2::new(WIN_W/2.0,12.0)};
+            let near=if dock==crate::model::Dock::Left {Pos2::new(8.0,hgt/2.0)} else if dock==crate::model::Dock::Right {Pos2::new(w-8.0,hgt/2.0)} else {Pos2::new(WIN_W/2.0,2.0)};
             if n!=3 {shoot_unread(&mut h,&mut r,&dest,&format!("unread-{key}-{n}-collapsed"),60,away);}
             shoot_unread(&mut h,&mut r,&dest,&format!("unread-{key}-{n}-open"),80,Some(near));
         }
-        // 微信多开：两个微信账号；两个微信账号 + QQ。
-        for (tag,qq) in [("multi2",false),("multi3",true)]{
-            let mut h=H::new();h.app.settings.dock=dock;fill(&mut h,0);
-            h.app.receive_wechat_reminder_from(101,0);h.app.receive_wechat_reminder_from(202,0);
-            if qq {h.app.receive_notification("QQ".into(),"QQ".into(),"测试".into());}
-            h.app.alerts.clear();h.app.notice=None;h.app.notification_bell_until=0.0;
-            let side=dock.is_side();
-            let (w,hgt)=if side {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,WIN_H)};
-            let mut r=if side {feature_raster_sized(w,hgt)} else {feature_raster()};
-            let away=Some(Pos2::new(if side {w/2.0} else {WIN_W/2.0},hgt-6.0));
-            let near=if dock==crate::model::Dock::Left {Pos2::new(8.0,hgt/2.0)} else if dock==crate::model::Dock::Right {Pos2::new(w-8.0,hgt/2.0)} else {Pos2::new(WIN_W/2.0,12.0)};
-            shoot_unread(&mut h,&mut r,&dest,&format!("unread-{key}-{tag}-collapsed"),60,away);
-            shoot_unread(&mut h,&mut r,&dest,&format!("unread-{key}-{tag}-open"),80,Some(near));
-        }
+        // 每个来源只有一条：确认图标互相不重叠，红点都露出来。
+        let mut h=H::new();h.app.settings.dock=dock;fill(&mut h,3);
+        let side=dock.is_side();
+        let (w,hgt)=if side {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,WIN_H)};
+        let mut r=if side {feature_raster_sized(w,hgt)} else {feature_raster()};
+        let away=Some(Pos2::new(if side {w/2.0} else {WIN_W/2.0},hgt-6.0));
+        shoot_unread(&mut h,&mut r,&dest,&format!("unread-{key}-three-sources-collapsed"),60,away);
     }
 }
-
-#[test]
 fn shelf_menu_last_action_fits_inside_window_and_works(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();

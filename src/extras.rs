@@ -81,32 +81,24 @@ pub(crate) fn notice_badge(c:&Card,x:f32,y:f32,a:&Alert){
         device_icon(c,a.bluetooth.map_or(crate::bt::DeviceKind::Other,|v|v.0),x-7.5,y-7.5,15.0);
     }else{notice_icon(&c.scaled(x,y,0.85),x,y,a);}
 }
-pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
-
-    let ink=Color32::from_gray(24);
-    if source==crate::app::Messenger::Wechat {
-        let back=Color32::from_rgb(70,203,123);
-        let front=Color32::from_rgb(145,235,165);
-        c.fill(x-10.,y-7.,14.,11.,5.5,back);
-        c.poly(&[(x-8.,y+1.),(x-8.,y+6.),(x-3.,y+2.)],back);
-        for dx in [-6.,-1.]{c.circle(x+dx,y-3.,0.9,ink);}
-        c.fill(x-2.,y-2.,13.,10.,5.,front);
-        c.poly(&[(x+5.,y+6.),(x+9.,y+10.),(x+8.,y+5.)],front);
-        for dx in [2.,7.]{c.circle(x+dx,y+1.,0.8,ink);}
-    }else if source==crate::app::Messenger::DingTalk {
-        // 钉钉：蓝色圆角方块 + 白色「钉」形标记。
-        let blue=Color32::from_rgb(22,132,255);
-        c.fill(x-9.5,y-9.5,19.0,19.0,5.0,blue);
-        c.fill(x-4.0,y-5.5,8.0,2.2,1.0,Color32::WHITE);
-        c.fill(x-1.1,y-4.2,2.2,8.4,1.0,Color32::WHITE);
-        c.fill(x-3.6,y+1.4,7.2,1.9,0.9,Color32::WHITE);
-    }else{
-        let rect=c.rect(x-9.5,y-9.5,19.0,19.0);
-        let icon=egui::Image::new(egui::include_image!("../assets/qq-client.png"));
-        if let Ok(egui::load::TexturePoll::Ready{texture})=icon.load_for_size(c.ui.ctx(),rect.size()){
-            c.painter.image(texture.id,rect,egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
-        }
+/// 客户端的官方图标：微信、钉钉取自各自官网，QQ 取自安装目录。
+fn client_icon(source:crate::app::Messenger)->egui::Image<'static>{
+    egui::Image::new(match source {
+        crate::app::Messenger::Wechat=>egui::include_image!("../assets/wechat-client.png"),
+        crate::app::Messenger::DingTalk=>egui::include_image!("../assets/dingtalk-client.png"),
+        crate::app::Messenger::Qq=>egui::include_image!("../assets/qq-client.png"),
+    })
+}
+/// 在 (x,y) 居中画一个半边长 size 的客户端图标；未加载好时留空，不画占位方块。
+fn client_icon_at(c:&Card,x:f32,y:f32,size:f32,source:crate::app::Messenger){
+    let rect=c.rect(x-size,y-size,size*2.0,size*2.0);
+    if let Ok(egui::load::TexturePoll::Ready{texture})=client_icon(source).load_for_size(c.ui.ctx(),rect.size()){
+        c.painter.image(texture.id,rect,egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
     }
+}
+pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
+    // 三个来源统一用官方品牌图标，尺寸一致，不再手绘。
+    client_icon_at(c,x,y,9.5,source)
 }
 fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
     if a.source!=AlertSource::Internal{crate::paint::bell(c,x,y,theme::WHITE,0.0);return;}
