@@ -138,8 +138,8 @@ impl Env {
 pub enum Messenger { Wechat, Qq, DingTalk }
 impl Messenger {
     pub fn name(self)->&'static str {match self {Self::Wechat=>"微信",Self::Qq=>"QQ",Self::DingTalk=>"钉钉"}}
-    /// 微信 / QQ 可通过窗口切换定位到会话；钉钉来自通知中心，只做提醒。
-    pub fn can_focus_window(self)->bool {!matches!(self, Self::DingTalk)}
+    /// 微信 / QQ / 钉钉都能按窗口切换定位（钉钉靠任务栏闪动与通知中心的 AppID 归属进程）。
+    pub fn can_focus_window(self)->bool {true}
 }
 
 /// 一条未读：来源、账号所在进程（QQ 通知分不出账号，记为 0）和发出提醒的窗口（没有时为 0）。
@@ -694,6 +694,8 @@ pub struct App {
     pub(crate) settings_tab:usize,
     pub(crate) settings_category:usize,
     pub wechat_status:String,
+    /// 钉钉闪动监听的状态说明（监听中 / 未找到安装路径等）。
+    pub dingtalk_status:String,
     pub(crate) notification_apps:model::NotificationApps,
     pub(crate) subpage:Option<usize>,
     pub(crate) task_dialog:Option<crate::extras::TaskDraft>,
@@ -834,7 +836,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_viewport_open:None, settings_tab:0, settings_category:0, wechat_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_viewport_open:None, settings_tab:0, settings_category:0, wechat_status:String::new(), dingtalk_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,

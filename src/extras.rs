@@ -6,7 +6,7 @@ use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Rect};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AlertSource { Internal, Wechat, External(String) }
+pub(crate) enum AlertSource { Internal, Wechat, DingTalk, External(String) }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Alert {
@@ -23,6 +23,7 @@ impl Alert {
     pub(crate) fn messenger(&self)->Option<crate::app::Messenger>{
         match &self.source {
             AlertSource::Wechat=>Some(crate::app::Messenger::Wechat),
+            AlertSource::DingTalk=>Some(crate::app::Messenger::DingTalk),
             AlertSource::External(id) if id=="QQ"=>Some(crate::app::Messenger::Qq),
             AlertSource::External(id) if id=="DingTalk"=>Some(crate::app::Messenger::DingTalk),
             _=>None,
@@ -34,6 +35,7 @@ fn notify_app_of(source:&AlertSource)->crate::notify_policy::NotifyApp{
     use crate::notify_policy::NotifyApp;
     match source {
         AlertSource::Wechat=>NotifyApp::Wechat,
+        AlertSource::DingTalk=>NotifyApp::DingTalk,
         AlertSource::External(id) if id=="QQ"=>NotifyApp::Qq,
         AlertSource::External(id) if id=="Feishu"=>NotifyApp::Feishu,
         AlertSource::External(id) if id=="DingTalk"=>NotifyApp::DingTalk,
@@ -348,6 +350,19 @@ impl App {
         self.notification_bell_until=self.t+4.5;
         self.enqueue_alert(Alert{source:AlertSource::Wechat,title:"微信".into(),body:"有新消息 · 请到微信查看".into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None},false);
     }
+    /// 钉钉任务栏闪动：与微信同一套语义——按账号（进程）合并，收起时显示图标与红点。
+    pub fn receive_dingtalk_reminder_from(&mut self,pid:u32,window:isize){
+        if !self.settings.dingtalk_notifications || !self.settings.notifications{return;}
+        self.mark_messenger(crate::app::Messenger::DingTalk,pid,window);
+        self.notification_bell_at=self.t;
+        self.notification_bell_until=self.t+4.5;
+        self.enqueue_alert(Alert{source:AlertSource::DingTalk,title:"钉钉".into(),body:"有新消息 · 请到钉钉查看".into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None},false);
+    }
+    /// 通知中心已经把这条钉钉消息提醒过了：不重复弹横幅，只累计未读。
+    pub fn mark_dingtalk_unread_from_notification(&mut self){
+        if !self.settings.dingtalk_notifications || !self.settings.notifications{return;}
+        self.mark_messenger(crate::app::Messenger::DingTalk,0,0);
+    }
     pub fn receive_notification(&mut self, app:String, id:String, body:String){
         if !self.settings.read_notifications || id.is_empty() || (self.settings.qq_only && id!="QQ"){return;}
         if id=="DingTalk" && !self.settings.dingtalk_notifications {return;}
@@ -355,8 +370,8 @@ impl App {
         if self.history.iter().any(|a|format!("{} · {}",a.title,a.body)==body){return;}
         if !self.notification_apps.observe(&id,&app) || !self.settings.notifications{return;}
         if id=="QQ"{self.mark_messenger(crate::app::Messenger::Qq,0,0);}
-        // 钉钉与微信同样计入未读，收起时显示图标与红点。
-        if id=="DingTalk"{self.mark_messenger(crate::app::Messenger::DingTalk,0,0);}
+        // 钉钉与微信同样计入未读（闪动监听已提醒过的那条不会重复弹横幅，见 receive_dingtalk_reminder_from）。
+        if id=="DingTalk"{self.mark_dingtalk_unread_from_notification();}
         self.notification_bell_at=self.t;
         self.notification_bell_until=self.t+4.5;
         let title=app.chars().filter(|c|!c.is_control()).take(80).collect();
@@ -376,6 +391,7 @@ impl App {
         let allowed=|a:&Alert|match &a.source {
             AlertSource::Internal=>true,
             AlertSource::Wechat=>self.settings.wechat_notifications && self.settings.notifications,
+            AlertSource::DingTalk=>self.settings.dingtalk_notifications && self.settings.notifications,
             AlertSource::External(id)=>self.settings.read_notifications
                 && (!self.settings.qq_only || id=="QQ")
                 && (id!="DingTalk" || self.settings.dingtalk_notifications)
@@ -1497,8 +1513,9 @@ impl App {
                         });
                         settings_label(ui,"钉钉提醒");
                         settings_card(ui,|ui|{
-                            setting_row(ui,"钉钉新消息提醒","从 Windows 通知中心读取；收起时显示图标与红点",&mut self.settings.dingtalk_notifications);
-                            ui.label(egui::RichText::new("需要钉钉开启 Windows 系统通知，且已连接系统通知（下方「QQ 与 Windows 通知」）。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            setting_row(ui,"钉钉新消息提醒","根据任务栏闪动提醒（与微信相同），不读取联系人或聊天正文",&mut self.settings.dingtalk_notifications);
+                            if self.settings.dingtalk_notifications && !self.dingtalk_status.is_empty(){ui.label(egui::RichText::new(&self.dingtalk_status).size(12.0));}
+                            ui.label(egui::RichText::new("通知中心里的钉钉通知同样计入未读，不会重复弹出。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                         });
                         settings_label(ui,"QQ 与 Windows 通知");
                         settings_card(ui,|ui|{

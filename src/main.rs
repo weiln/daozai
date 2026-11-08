@@ -42,7 +42,8 @@ struct Shell {
     #[cfg(windows)]
     incoming: Option<daozai::system::Notifications>,
     #[cfg(windows)]
-    wechat: Option<daozai::wechat::Listener>,
+    /// 微信与钉钉共用的任务栏闪动监听。
+    wechat: Option<daozai::messenger_flash::Listener>,
     #[cfg(windows)]
     wechat_retry: Option<Instant>,
     #[cfg(windows)]
@@ -381,30 +382,41 @@ impl eframe::App for Shell {
             if let Some(service)=&self.bt_rx {
                 while let Ok(found)=service.rx.try_recv(){ self.bt=found; self.bt_ready=true; }
             }
+            // 同一套监听窗口解析微信与钉钉的闪动；两个提醒都关掉时整体释放。
             let wechat_enabled=self.app.settings.wechat_notifications && self.app.settings.notifications;
+            let dingtalk_enabled=self.app.settings.dingtalk_notifications && self.app.settings.notifications;
             if self.wechat.as_ref().is_some_and(|listener|!listener.registered()){self.wechat=None;}
-            if !wechat_enabled {
+            if !(wechat_enabled||dingtalk_enabled) {
                 self.wechat=None;
                 self.wechat_retry=None;
                 // 微信开关开着却被总开关挡住时说清原因，否则用户只会看到「开了也不提醒」。
                 if self.app.settings.wechat_notifications {
                     self.app.wechat_status="未在监听 · 提醒总开关已关闭".into();
                 }else{self.app.wechat_status.clear();}
+                self.app.dingtalk_status.clear();
             }else if self.wechat.is_none() && self.wechat_retry.is_none_or(|at|at.elapsed()>=Duration::from_secs(10)){
-                match daozai::wechat::Listener::new(ctx.clone()){
+                let mut wanted=Vec::new();
+                if wechat_enabled{wanted.push(app::Messenger::Wechat);}
+                if dingtalk_enabled{wanted.push(app::Messenger::DingTalk);}
+                match daozai::messenger_flash::Listener::new(ctx.clone(),&wanted){
                     Ok(listener)=>{
+                        let watched=listener.sources();
+                        self.app.wechat_status=if watched.contains(&app::Messenger::Wechat){"正在监听 · 微信任务栏闪动时提醒".into()}else{String::new()};
+                        self.app.dingtalk_status=if watched.contains(&app::Messenger::DingTalk){"正在监听 · 钉钉任务栏闪动时提醒".into()}
+                            else if dingtalk_enabled{"未找到钉钉安装路径 · 仅从通知中心提醒".into()}else{String::new()};
                         self.wechat=Some(listener);
                         self.wechat_retry=None;
-                        self.app.wechat_status="正在监听 · 微信任务栏闪动时提醒".into();
                     }
                     Err(error)=>{
                         self.wechat_retry=Some(Instant::now());
-                        self.app.wechat_status=format!("{error} · 10 秒后重试");
+                        if wechat_enabled{self.app.wechat_status=format!("{error} · 10 秒后重试");}
+                        if dingtalk_enabled{self.app.dingtalk_status=format!("{error} · 10 秒后重试");}
                     }
                 }
             }
             let previous_pending=self.app.pending_messengers.len();
-            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take()).unwrap_or_default(){daozai::wechat::trace(format!("岛上显示微信未读 账号 {pid}"));self.app.receive_wechat_reminder_from(pid,window);}
+            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take(app::Messenger::Wechat)).unwrap_or_default(){daozai::wechat::trace(format!("岛上显示微信未读 账号 {pid}"));self.app.receive_wechat_reminder_from(pid,window);}
+            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take(app::Messenger::DingTalk)).unwrap_or_default(){daozai::wechat::trace(format!("岛上显示钉钉未读 账号 {pid} 窗口 {window:#x}"));self.app.receive_dingtalk_reminder_from(pid,window);}
             if let Some(rx)=&self.incoming {
                 while let Ok(event)=rx.try_recv(){match event {daozai::system::Incoming::Revoked=>{self.app.settings.read_notifications=false;self.app.settings.save();},daozai::system::Incoming::Status(s)=>self.app.listener_status=s,daozai::system::Incoming::Message(a,id,b)=>self.app.receive_notification(a,id,b)}}
             }
@@ -536,7 +548,7 @@ impl eframe::App for Shell {
                     }
                 }
                 Cmd::ViewMessenger(unread)=>{
-                    // 钉钉来自通知中心，不做窗口级切换：直接清除该来源未读。
+                    // 通知中心只给出「哪条应用」，分不出账号（pid 0）：清除该来源未读。
                     if !unread.source.can_focus_window() {
                         self.app.viewed_messenger(unread.source);
                         self.app.say(format!("已清除{}未读", unread.source.name()));
@@ -550,6 +562,7 @@ impl eframe::App for Shell {
                             }
                         },
                         Err(_) if self.app.settings.wechat_tray_open && unread.source==app::Messenger::Wechat && self.tray_opening.is_none()=>{
+                            // 托盘按钮唤起目前只对微信实现（钉钉缩在托盘时提示从任务栏打开）。
                             match daozai::wechat::wechat_in_tray(unread){
                                 Ok(())=>{
                                     // 缩在托盘：后台线程按下该账号的托盘按钮，不阻塞界面。

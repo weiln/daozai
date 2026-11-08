@@ -1,30 +1,11 @@
-//! 只接收微信任务栏提醒；复用主窗口消息循环，不读取聊天内容。
-use std::{cell::RefCell, path::PathBuf, time::{Duration, Instant}};
+﻿//! 微信提醒的解码、托盘唤起与跳转。任务栏闪动监听（微信 / 钉钉共用）在 messenger_flash。
+use std::{path::PathBuf, time::{Duration, Instant}};
 use windows::{core::{w, PCWSTR, PWSTR}, Win32::{
-    Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM},
+    Foundation::{CloseHandle, HWND, LRESULT, LPARAM, WPARAM},
     System::{Registry::{RegGetValueW, HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, RRF_RT_REG_SZ},
         Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION}},
-    UI::{Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass}, WindowsAndMessaging::*},
+    UI::WindowsAndMessaging::*,
 }};
-
-const SUBCLASS_ID: usize = 0x5745_4348;
-const FLASH: usize = 0x8006;
-
-/// 看过某个账号后切走：这段时间内的闪动算作刚才那次提醒的余波。
-const LEAVE_GRACE: Duration = Duration::from_secs(4);
-
-#[derive(Default)]
-struct Burst { last: Option<Instant>, quiet_until: Option<Instant> }
-impl Burst {
-    fn attention(&mut self, now: Instant) -> bool {
-        // 刚看完切走：任务栏补闪不算新提醒，但计入这一轮，持续闪动也继续合并。
-        if self.quiet_until.is_some_and(|until| now < until) {self.last=Some(now);return false;}
-        // 连续闪动只提醒一次；停止闪动五秒后，下一轮才算新提醒。
-        self.last.replace(now).is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5))
-    }
-    /// 用户刚从这个账号的窗口切走。
-    fn left(now: Instant) -> Self { Self{last:Some(now),quiet_until:Some(now+LEAVE_GRACE)} }
-}
 
 fn normalized(path: &str) -> String {
     path.trim_start_matches(r"\\?\").replace('/', "\\").to_lowercase()
@@ -48,7 +29,7 @@ fn protocol_executable(command:&str)->Option<PathBuf>{
     (path.is_absolute() && (name.eq_ignore_ascii_case("Weixin.exe") || name.eq_ignore_ascii_case("WeChat.exe"))).then_some(path)
 }
 
-fn installed_paths() -> Vec<String> {
+pub(crate) fn installed_paths() -> Vec<String> {
     let mut paths=Vec::new();
     for (key,exe) in [(w!("Software\\Tencent\\Weixin"),"Weixin.exe"),(w!("Software\\Tencent\\WeChat"),"WeChat.exe")] {
         if let Some(folder)=registry_string(HKEY_CURRENT_USER,key,w!("InstallPath")){paths.push(PathBuf::from(folder).join(exe));}
@@ -83,11 +64,17 @@ fn company_name(path:&str)->String{
     name
 }
 
-/// 路径完全一致；或命中「*文件名」且该程序由腾讯发布。
+pub(crate) fn matches_paths(hwnd:HWND,paths:&[String])->bool{unsafe{matches(hwnd,paths)}}
+
+pub(crate) fn pid_in(pid:u32,paths:&[String])->bool{unsafe{pid_matches(pid,paths)}}
+
+/// 路径完全一致；或命中「*文件名」且该程序由发布方发布（腾讯的微信 / QQ，阿里的钉钉）。
 fn path_allowed(image:&str,paths:&[String])->bool{
     if paths.iter().any(|p|p==image){return true;}
     let file=image.rsplit('\\').next().unwrap_or(image);
-    paths.iter().any(|p|p.strip_prefix('*').is_some_and(|name|name==file)) && company_name(image).to_lowercase().contains("tencent")
+    if !paths.iter().any(|p|p.strip_prefix('*').is_some_and(|name|name==file)){return false;}
+    let company=company_name(image).to_lowercase();
+    company.contains("tencent") || company.contains("alibaba") || company.contains("dingtalk")
 }
 
 unsafe fn matches(hwnd: HWND, paths: &[String]) -> bool {
@@ -105,8 +92,8 @@ unsafe fn pid_matches(pid:u32, paths: &[String]) -> bool {
     result.is_ok() && path_allowed(&normalized(&String::from_utf16_lossy(&path[..length as usize])),paths)
 }
 
-fn client_paths(source:crate::app::Messenger)->Vec<String>{
-    if source==crate::app::Messenger::Wechat{return installed_paths();}
+/// QQ 的安装路径（微信走 installed_paths，钉钉走 messenger_flash::dingtalk_paths）。
+pub(crate) fn qq_paths()->Vec<String>{
     use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
     let mut candidates=Vec::new();
     for root in [HKEY_CURRENT_USER,HKEY_LOCAL_MACHINE]{
@@ -133,12 +120,14 @@ fn client_paths(source:crate::app::Messenger)->Vec<String>{
     paths
 }
 
+fn client_paths(source:crate::app::Messenger)->Vec<String>{crate::messenger_flash::client_paths(source)}
+
 fn client_main_frame(source:crate::app::Messenger,class:&str,style:u32,extended:u32)->bool{
     let known=match source {
         crate::app::Messenger::Qq=>matches!(class,"Chrome_WidgetWin_1"|"TXGuiFoundation"),
         crate::app::Messenger::Wechat=>class=="WeChatMainWndForPC" || class.starts_with("Qt") && class.ends_with("QWindowIcon"),
-        // 钉钉不走窗口查找（来自通知中心），不会进入这里。
-        crate::app::Messenger::DingTalk=>false,
+        // 钉钉：新版 Electron（Chrome_WidgetWin_1）与旧版 Qt 外壳都认；靠「有系统菜单 + 最小化按钮」过滤弹窗。
+        crate::app::Messenger::DingTalk=>class=="Chrome_WidgetWin_1" || class=="StandardFrame_DingTalk" || class.starts_with("Qt") && class.ends_with("QWindowIcon"),
     };
     let frame=(WS_SYSMENU|WS_MINIMIZEBOX).0;
     let resizable_frame=(WS_CAPTION|WS_THICKFRAME|WS_MINIMIZEBOX).0;
@@ -419,6 +408,7 @@ pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
     use windows::{core::Interface,Win32::{Foundation::RECT,System::Com::*,UI::{Accessibility::*,HiDpi::*}}};
     let mut log=TrayLog::new(unread);
     if unread.source!=crate::app::Messenger::Wechat {return Err(log.fail("T1","不是微信提醒"));}
+    // 钉钉不走托盘唤起（入口是 wechat_in_tray / open_unread），这里只处理微信。
     let paths=client_paths(unread.source);
     unsafe {
         let _=SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1042,79 +1032,6 @@ mod tests {
         assert_eq!(protocol_executable(r#""D:\Program Files\WeChat.exe" "%1""#),Some(PathBuf::from(r"D:\Program Files\WeChat.exe")));
         assert!(protocol_executable("Weixin.exe %1").is_none());
         assert!(protocol_executable(r#""C:\Windows\cmd.exe" /c Weixin.exe"#).is_none());
-    }
-    #[test]
-    #[ignore="需要已启动并位于后台的微信窗口；仅向测试窗口发送模拟事件"]
-    fn local_wechat_background_window(){unsafe{
-        let target:isize=std::env::var("DAOZAI_TEST_WECHAT_HWND").unwrap().parse().unwrap();
-        let listener=Listener::new(Default::default()).unwrap();
-        let hwnd=listener.hwnd;
-        let message=RegisterWindowMessageW(w!("SHELLHOOK"));
-        SendMessageW(hwnd,message,WPARAM(FLASH),LPARAM(target));assert!(!listener.take().is_empty());
-        SendMessageW(hwnd,message,WPARAM(FLASH),LPARAM(target));assert!(listener.take().is_empty());
-        drop(listener);assert!(!IsWindow(hwnd).as_bool());
-    }}
-    #[test]
-    fn shell_notifications_filter_targets_merge_flashes_and_detach(){unsafe{
-        let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,w!("STATIC"),w!(""),WS_POPUP,0,0,0,0,None,None,None,None).unwrap();
-        let message=RegisterWindowMessageW(w!("SHELLHOOK"));
-        let state=Box::new(RefCell::new(State{message,taskbar_created:RegisterWindowMessageW(w!("TaskbarCreated")),registered:true,paths:vec![],burst:Vec::new(),pending:Vec::new(),viewing:Vec::new(),ctx:Default::default()}));
-        SetWindowSubclass(hwnd,Some(subclass),SUBCLASS_ID,(&*state as *const RefCell<State>) as usize).ok().unwrap();
-        RegisterShellHookWindow(hwnd).ok().unwrap();
-        let listener=Listener{hwnd,state};
-        SendMessageW(hwnd,message,WPARAM(FLASH),LPARAM(hwnd.0 as isize));
-        assert!(listener.take().is_empty(),"其他程序的闪动不得触发微信提醒");
-        listener.state.borrow_mut().paths=vec![normalized(&std::env::current_exe().unwrap().to_string_lossy())];
-        SendMessageW(hwnd,message,WPARAM(FLASH),LPARAM(0));assert!(listener.take().is_empty());
-        SendMessageW(hwnd,message,WPARAM(FLASH),LPARAM(hwnd.0 as isize));
-        assert_eq!(listener.take(),[(std::process::id(),hwnd.0 as isize)],"提醒带上账号进程和闪动的窗口");
-        SendMessageW(hwnd,message,WPARAM(FLASH),LPARAM(hwnd.0 as isize));assert!(listener.take().is_empty());
-        SendMessageW(hwnd,message,WPARAM(4),LPARAM(hwnd.0 as isize));
-        SendMessageW(hwnd,message,WPARAM(FLASH),LPARAM(hwnd.0 as isize));assert!(listener.take().is_empty());
-        listener.state.borrow_mut().burst.clear();
-        SendMessageW(hwnd,message,WPARAM(FLASH),LPARAM(hwnd.0 as isize));
-        SendMessageW(hwnd,message,WPARAM(0x8004),LPARAM(hwnd.0 as isize));
-        assert!(!listener.take().is_empty(),"后台窗口的激活事件应保留尚未消费的提醒");
-        DeregisterShellHookWindow(hwnd).ok().unwrap();
-        SendMessageW(hwnd,RegisterWindowMessageW(w!("TaskbarCreated")),WPARAM(0),LPARAM(0));
-        assert!(listener.registered());
-        drop(listener);assert!(!IsWindow(hwnd).as_bool());
-    }}
-    #[test]
-    fn continuous_flashes_are_one_reminder_and_quiet_gap_rearms(){
-        let start=Instant::now();let mut burst=Burst::default();
-        assert!(burst.attention(start));
-        for second in 1..30 {assert!(!burst.attention(start+Duration::from_secs(second)));}
-        assert!(burst.attention(start+Duration::from_secs(34)));
-        burst=Burst::default();
-        assert!(burst.attention(start+Duration::from_secs(35)));
-    }
-    #[test]
-    fn wechat_is_recognized_by_tencent_file_name_when_registry_path_is_stale(){
-        // 注册表里的旧路径对不上时，仍按「文件名 + 腾讯发布」识别；其它公司的同名程序不算。
-        let stale=vec![normalized(r"C:\Old\Weixin\Weixin.exe"),"*weixin.exe".to_string()];
-        let me=normalized(&std::env::current_exe().unwrap().to_string_lossy());
-        assert!(!path_allowed(&me,&stale),"测试程序不是腾讯发布的微信");
-        assert!(path_allowed(&normalized(r"C:\Old\Weixin\Weixin.exe"),&stale),"注册表路径仍直接认");
-        assert!(!path_allowed(&me,&[]));
-        // 本机装了微信时，用它的真实程序验证：路径列表里只有过期路径也能认出来。
-        if let Some(real)=installed_paths().into_iter().find(|p|!p.starts_with('*')){
-            assert!(company_name(&real).to_lowercase().contains("tencent"),"本机微信的公司名：{}",company_name(&real));
-            assert!(path_allowed(&real,&stale));
-            assert!(!path_allowed(&real,&[normalized(r"C:\Old\Weixin\Weixin.exe"),"*qq.exe".into()]),"文件名不对不得认作其它客户端");
-        }
-    }
-    #[test]
-    fn flashes_right_after_leaving_a_viewed_account_do_not_remind_again(){
-        // 群友反馈：最小化收到消息 → Alt+Tab 过去看了 → 再 Alt+Tab 切走，未读又出现。
-        let start=Instant::now();
-        let mut burst=Burst::left(start);
-        assert!(!burst.attention(start+Duration::from_millis(200)),"切走时的补闪不算新提醒");
-        assert!(!burst.attention(start+Duration::from_secs(3)),"宽限期内的闪动不算");
-        for second in 4..20 {assert!(!burst.attention(start+Duration::from_secs(second)),"补闪持续不断时继续合并：{second}s");}
-        assert!(burst.attention(start+Duration::from_secs(26)),"安静五秒后的新消息照常提醒");
-        let mut quiet=Burst::left(start);
-        assert!(quiet.attention(start+Duration::from_secs(10)),"切走后过了宽限期且没有补闪，新消息照常提醒");
     }
     #[test]
     fn paths_match_full_install_location(){

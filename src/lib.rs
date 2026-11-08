@@ -27,6 +27,8 @@ pub mod mail_manage;
 mod mail_manage_ui;
 pub mod clipboard;
 pub mod agent_status;
+#[cfg(windows)]
+pub mod messenger_flash;
 pub mod notify_policy;
 pub mod ai_usage;
 mod ai_usage_ui;
