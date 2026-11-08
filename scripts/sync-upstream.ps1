@@ -1,4 +1,4 @@
-<#
+﻿<#
 同步上游（Renly1994/xiaotang-daozai）的新版本到本地的 mine 分支。
 
 用法：
@@ -57,10 +57,10 @@ git rebase upstream/main
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "REBASE 冲突了。处理方法：" -ForegroundColor Red
-    Write-Host "  1. 按提示逐个编辑冲突文件，删掉 <<<<<<< ======= >>>>>>> 标记，保留双方逻辑" -ForegroundColor Gray
-    Write-Host "  2. git add <文件>" -ForegroundColor Gray
-    Write-Host "  3. git rebase --continue" -ForegroundColor Gray
-    Write-Host "  放弃可用： git rebase --abort" -ForegroundColor Gray
+    Write-Host '  1. 按提示逐个编辑冲突文件，删掉冲突标记行，保留双方逻辑' -ForegroundColor Gray
+    Write-Host '  2. git add 冲突文件' -ForegroundColor Gray
+    Write-Host '  3. git rebase --continue' -ForegroundColor Gray
+    Write-Host '  放弃可用： git rebase --abort' -ForegroundColor Gray
     exit 2
 }
 
