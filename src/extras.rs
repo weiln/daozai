@@ -24,10 +24,22 @@ impl Alert {
         match &self.source {
             AlertSource::Wechat=>Some(crate::app::Messenger::Wechat),
             AlertSource::External(id) if id=="QQ"=>Some(crate::app::Messenger::Qq),
+            AlertSource::External(id) if id=="DingTalk"=>Some(crate::app::Messenger::DingTalk),
             _=>None,
         }
     }
     pub(crate) fn is_hud(&self)->bool {self.source==AlertSource::Internal && matches!(self.title.as_str(),"系统音量"|"大写锁定"|"键盘输入语言"|"网络连接"|"电源已连接"|"已切换电池供电"|"蓝牙设备")}
+}
+fn notify_app_of(source:&AlertSource)->crate::notify_policy::NotifyApp{
+    use crate::notify_policy::NotifyApp;
+    match source {
+        AlertSource::Wechat=>NotifyApp::Wechat,
+        AlertSource::External(id) if id=="QQ"=>NotifyApp::Qq,
+        AlertSource::External(id) if id=="Feishu"=>NotifyApp::Feishu,
+        AlertSource::External(id) if id=="DingTalk"=>NotifyApp::DingTalk,
+        AlertSource::External(_)=>NotifyApp::Internal,
+        AlertSource::Internal=>NotifyApp::Internal,
+    }
 }
 fn bluetooth_notice_content(body:&str)->(&str,&str,Option<u8>){
     if let Some(name)=body.strip_suffix(" · 已断开") {return (name,"已断开",None);}
@@ -79,6 +91,13 @@ pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
         c.fill(x-2.,y-2.,13.,10.,5.,front);
         c.poly(&[(x+5.,y+6.),(x+9.,y+10.),(x+8.,y+5.)],front);
         for dx in [2.,7.]{c.circle(x+dx,y+1.,0.8,ink);}
+    }else if source==crate::app::Messenger::DingTalk {
+        // 钉钉：蓝色圆角方块 + 白色「钉」形标记。
+        let blue=Color32::from_rgb(22,132,255);
+        c.fill(x-9.5,y-9.5,19.0,19.0,5.0,blue);
+        c.fill(x-4.0,y-5.5,8.0,2.2,1.0,Color32::WHITE);
+        c.fill(x-1.1,y-4.2,2.2,8.4,1.0,Color32::WHITE);
+        c.fill(x-3.6,y+1.4,7.2,1.9,0.9,Color32::WHITE);
     }else{
         let rect=c.rect(x-9.5,y-9.5,19.0,19.0);
         let icon=egui::Image::new(egui::include_image!("../assets/qq-client.png"));
@@ -235,10 +254,46 @@ impl App {
         };
         self.enqueue_alert(a, false);
     }
+    /// 该通知是否应被聚合策略抑制（免打扰 / 按应用静音）。
+    fn notify_suppressed(&self, app: crate::notify_policy::NotifyApp) -> bool {
+        use crate::notify_policy::{decide, Decision, QuietHours};
+        let now_min = {
+            let now = chrono::Local::now();
+            use chrono::Timelike;
+            (now.hour() * 60 + now.minute()) as u16
+        };
+        let quiet = QuietHours::from_hours(self.settings.dnd_start, self.settings.dnd_end);
+        let muted = self.settings.mute_apps[app.index()];
+        matches!(decide(self.settings.dnd_enabled, quiet, now_min, muted), Decision::Muted | Decision::Quiet)
+    }
+    /// 累加摘要计数（静音/免打扰时）。
+    fn digest_count(&mut self, app: crate::notify_policy::NotifyApp) {
+        self.notify_digest_counts[app.index()] = self.notify_digest_counts[app.index()].saturating_add(1);
+    }
+    /// 摘要文案（供设置页/岛体显示）：如“5 条微信未读；3 封新邮件”。
+    pub(crate) fn notify_digest_summary(&self) -> String {
+        let mut parts = Vec::new();
+        for app in crate::notify_policy::NotifyApp::ALL {
+            let n = self.notify_digest_counts[app.index()];
+            if n > 0 {
+                parts.push(crate::notify_policy::digest_text(app, n));
+            }
+        }
+        parts.join("；")
+    }
+
     fn enqueue_alert(&mut self, a: Alert, system: bool) {
         // 通知仅保存在本次运行的内存中。
         if a.source==AlertSource::Internal {self.history.push_front(a.clone());}
         self.history.truncate(50);
+        // 通知智能聚合：免打扰 / 按应用静音时，仍计入历史（供摘要），但不弹出、不送系统通知。
+        let app = notify_app_of(&a.source);
+        let suppressed = self.notify_suppressed(app);
+        if suppressed {
+            // 静音/免打扰：计数进摘要，不弹窗。
+            if self.settings.notifications { self.digest_count(app); }
+            return;
+        }
         if self.settings.notifications {
             if system && a.source==AlertSource::Internal {
                 self.pending
@@ -295,10 +350,13 @@ impl App {
     }
     pub fn receive_notification(&mut self, app:String, id:String, body:String){
         if !self.settings.read_notifications || id.is_empty() || (self.settings.qq_only && id!="QQ"){return;}
+        if id=="DingTalk" && !self.settings.dingtalk_notifications {return;}
         // 岛仔自己发出的系统提醒会被通知中心回传；已在历史里的同一内容不再入队，避免重复显示。
         if self.history.iter().any(|a|format!("{} · {}",a.title,a.body)==body){return;}
         if !self.notification_apps.observe(&id,&app) || !self.settings.notifications{return;}
         if id=="QQ"{self.mark_messenger(crate::app::Messenger::Qq,0,0);}
+        // 钉钉与微信同样计入未读，收起时显示图标与红点。
+        if id=="DingTalk"{self.mark_messenger(crate::app::Messenger::DingTalk,0,0);}
         self.notification_bell_at=self.t;
         self.notification_bell_until=self.t+4.5;
         let title=app.chars().filter(|c|!c.is_control()).take(80).collect();
@@ -313,11 +371,16 @@ impl App {
         self.pending_messengers.retain(|u|self.settings.notifications && match u.source {
             crate::app::Messenger::Wechat=>self.settings.wechat_notifications,
             crate::app::Messenger::Qq=>self.settings.read_notifications && self.notification_apps.items.iter().any(|(key,_,on)|key=="QQ" && *on),
+            crate::app::Messenger::DingTalk=>self.settings.dingtalk_notifications && self.notification_apps.items.iter().any(|(key,_,on)|key=="DingTalk" && *on),
         });
         let allowed=|a:&Alert|match &a.source {
             AlertSource::Internal=>true,
             AlertSource::Wechat=>self.settings.wechat_notifications && self.settings.notifications,
-            AlertSource::External(id)=>self.settings.read_notifications && (!self.settings.qq_only || id=="QQ") && self.settings.notifications && self.notification_apps.items.iter().any(|(key,_,on)|key==id && *on),
+            AlertSource::External(id)=>self.settings.read_notifications
+                && (!self.settings.qq_only || id=="QQ")
+                && (id!="DingTalk" || self.settings.dingtalk_notifications)
+                && self.settings.notifications
+                && self.notification_apps.items.iter().any(|(key,_,on)|key==id && *on),
         };
         self.alerts.retain(&allowed);
         if self.notice.as_ref().is_some_and(|a|!allowed(a)){self.notice=None;}
@@ -736,7 +799,8 @@ impl App {
     pub(crate) fn task_editor_inputs(&mut self,ui:&mut egui::Ui,origin:egui::Pos2,cmds:&mut Vec<Cmd>){
         let Some(d)=self.task_dialog.as_mut() else{return};
         if d.reminder_only || d.picker.open{return;}
-        let name=ui.put(Rect::from_min_size(origin+egui::vec2(97.0,35.0),egui::vec2(260.0,17.0)),egui::TextEdit::singleline(&mut d.text).vertical_align(egui::Align::Center).id(egui::Id::new("task-name-edit")).frame(false).font(theme::font(11.5,W::Regular)));
+        let s=crate::app::LAYOUT_SCALE;
+        let name=ui.put(Rect::from_min_size(origin+egui::vec2(97.0,35.0)*s,egui::vec2(260.0,17.0)*s),egui::TextEdit::singleline(&mut d.text).vertical_align(egui::Align::Center).id(egui::Id::new("task-name-edit")).frame(false).font(theme::font(11.5*s,W::Regular)));
         let first_focus=!d.focused;
         if first_focus{name.request_focus();d.focused=true;cmds.push(Cmd::Focus);}
         // 新建内容与下一步共用这一帧，避免同一次回车又提交了空提醒。
@@ -1061,6 +1125,11 @@ impl App {
         if !self.settings_open{return;}
         let id=egui::ViewportId::from_hash_of("daozai-settings");
         let focus_requested=std::mem::take(&mut self.settings_focus_requested);
+        // 每次进入都按“首帧可见、随后显式显示”处理：视口是立即模式创建的，
+        // 窗口会被反复新建，若只在点击时请求可见，main.rs 里自动打开的那次就永远是隐藏窗口。
+        let first_frame=self.settings_viewport_open!=Some(id);
+        self.settings_viewport_open=Some(id);
+        let focus_requested=focus_requested||first_frame;
         ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([690.0,560.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
             let dark=self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx));
             let original_style=ctx.style();
@@ -1158,6 +1227,7 @@ impl App {
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                         settings_label(ui,"常驻排列");
                         settings_card(ui,|ui|self.resident_order_settings(ui));
+
                         settings_label(ui,"状态组件");
                         settings_card(ui,|ui|{
                             setting_row(ui,"电量","本机电量、充电状态与提醒；无电池设备自动隐藏",&mut self.settings.show_battery);
@@ -1166,7 +1236,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","token 用量与成本分析","CPU、内存与 GPU 实时读数"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1308,6 +1378,19 @@ impl App {
                             ui.separator();
                             setting_row(ui,"全屏时隐藏","游戏、视频和演示全屏时隐藏",&mut self.settings.hide_fullscreen);
                         });
+                        settings_label(ui,"快捷翻译");
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"启用全局快捷键","按 Alt+C 随时唤起独立翻译窗口",&mut self.settings.translate_enabled);
+                            ui.separator();
+                            settings_control_row_right(ui,"默认译向",|ui|{
+                                let opts=[(crate::translate::Direction::Auto,"自动"),(crate::translate::Direction::ZhEn,"中→英"),(crate::translate::Direction::EnZh,"英→中")];
+                                settings_segmented(ui,&mut self.settings.translate_direction,&opts,56.0);
+                            });
+                            settings_hint(ui,"自动模式：检测到中文则中译英，否则英译中。密钥保存在 Windows 凭据管理器。");
+                            ui.separator();
+                            self.translate_settings_button(ui);
+                        });
+                        self.sysmon_settings(ui);
                     }
                     1=>{
                         settings_label(ui,"歌词");
@@ -1374,8 +1457,14 @@ impl App {
                         });
                         settings_label(ui,"剪贴板");
                         settings_card(ui,|ui|{
-                            setting_row(ui,"记录剪贴板","在置物架的「剪贴板」里查看最近复制的文字，点一下再次复制",&mut self.settings.clipboard_history);
-                            ui.label(egui::RichText::new(format!("本机保存最近 {} 条，重新打开后可继续使用。关闭记录会暂停收集，手动清空会保留固定条目。密码管理器标记为敏感的内容不会记录。",crate::clipboard::MAX_RECENT)).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            setting_row(ui,"记录剪贴板","在置物架的「剪贴板」里查看最近复制的文字与图片，点一下再次复制",&mut self.settings.clipboard_history);
+                            ui.separator();
+                            settings_control_row(ui,"保留数量",56.0,|ui|{
+                                let mut n=self.settings.clipboard_max_recent.clamp(5,200) as i32;
+                                if ui.add(egui::Slider::new(&mut n,5..=200).suffix(" 条")).changed(){self.settings.clipboard_max_recent=n as u32;}
+                                ui.label(egui::RichText::new("固定不占名额").size(11.0).color(settings_color(ctx,Color32::from_gray(170),Color32::from_gray(95))))
+                            });
+                            ui.label(egui::RichText::new(format!("本机保存最近 {} 条，重新打开后可继续使用。密码管理器标记为敏感的内容不会记录。",self.settings.clipboard_max_recent)).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             ui.add_space(5.0);
                             if ui.add_sized([120.0,32.0],egui::Button::new("打开剪贴板")).clicked(){self.settings_open=false;self.shelf_tab=1;self.show_page(3);}
                         });
@@ -1406,6 +1495,11 @@ impl App {
                             if master && !self.wechat_status.is_empty(){ui.label(egui::RichText::new(&self.wechat_status).size(12.0));}
                             });
                         });
+                        settings_label(ui,"钉钉提醒");
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"钉钉新消息提醒","从 Windows 通知中心读取；收起时显示图标与红点",&mut self.settings.dingtalk_notifications);
+                            ui.label(egui::RichText::new("需要钉钉开启 Windows 系统通知，且已连接系统通知（下方「QQ 与 Windows 通知」）。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                        });
                         settings_label(ui,"QQ 与 Windows 通知");
                         settings_card(ui,|ui|{
                             master_hint(ui);
@@ -1427,6 +1521,34 @@ impl App {
                             for (_,name,enabled) in &mut self.notification_apps.items {setting_row(ui,name,"",enabled);}
                             if before_apps!=self.notification_apps.items{self.notification_apps.save();}
                             });
+                        });
+                        settings_label(ui,"智能聚合");
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"免打扰时段","期间不弹出提醒，只计入摘要",&mut self.settings.dnd_enabled);
+                            if self.settings.dnd_enabled {
+                                settings_control_row(ui,"时段",56.0,|ui|{
+                                    ui.horizontal(|ui|{
+                                        number_stepper(ui,&mut self.settings.dnd_start,0,23," 时",1,48.0);
+                                        ui.label("至");
+                                        number_stepper(ui,&mut self.settings.dnd_end,0,24," 时",1,48.0);
+                                    }).response
+                                });
+                            }
+                            ui.separator();
+                            ui.label(egui::RichText::new("按应用静音（仍计入摘要）").size(12.0));
+                            ui.horizontal_wrapped(|ui|{
+                                for (i,app) in crate::notify_policy::NotifyApp::ALL.into_iter().enumerate() {
+                                    let mut on = self.settings.mute_apps[i];
+                                    if ui.checkbox(&mut on, app.label()).changed() { self.settings.mute_apps[i] = on; }
+                                }
+                            });
+                            ui.separator();
+                            setting_row(ui,"折叠为摘要","多条未读折叠显示「N 条微信未读」",&mut self.settings.notify_digest);
+                            let summary = self.notify_digest_summary();
+                            if !summary.is_empty() {
+                                ui.label(egui::RichText::new(format!("当前摘要：{summary}")).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            }
+                            ui.label(egui::RichText::new("飞书 / 钉钉通过 Windows 通知中心读取（需系统通知已连接），无需额外授权。").size(11.5).color(settings_color(ctx,Color32::from_gray(160),Color32::from_gray(100))));
                         });
                     }
                     7=>{

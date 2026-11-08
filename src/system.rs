@@ -284,6 +284,10 @@ fn notification_identity(n:&UserNotification, number:u32, created:i64, known_qq:
     }
     let name=info.and_then(|app|app.DisplayInfo().ok()).and_then(|display|display.DisplayName().ok())
         .map(|name|name.to_string()).filter(|name|!name.trim().is_empty()).unwrap_or_else(||"Windows 通知".into());
+    // 飞书 / 钉钉：归一为固定标识，便于按应用静音与摘要。
+    if let Some(kind)=office_im_kind(&name,&id){
+        return ((if kind=="Feishu"{"飞书"}else{"钉钉"}).into(),kind.into());
+    }
     let id=if id.is_empty(){name.clone()}else{id};
     (name,id)
 }
@@ -302,6 +306,20 @@ fn notification_body(n: &UserNotification) -> Result<String> {
 fn is_wechat_toast(app:&str,id:&str)->bool{
     ["微信","WeChat","Weixin"].iter().any(|name|app.trim().eq_ignore_ascii_case(name))
         || ["WeChat","Weixin","Tencent.WeChat","Tencent.Weixin"].iter().any(|name|id.eq_ignore_ascii_case(name))
+}
+/// 飞书 / 钉钉的 Windows 通知标识（AppUserModelId 或显示名）。
+/// 走与其它外部通知相同的管线，无需 OAuth。
+pub(crate) fn office_im_kind(app:&str,id:&str)->Option<&'static str>{
+    let hit=|needles:&[&str],value:&str|needles.iter().any(|n|{
+        let n=n.to_ascii_lowercase();
+        let v=value.trim().to_ascii_lowercase();
+        v==n || v.contains(&n)
+    });
+    const FEISHU:&[&str]=&["飞书","feishu","lark","byte-ime","bytedance.feishu","bytedance.lark"];
+    const DING:&[&str]=&["钉钉","dingtalk","dingding","alibaba.dingtalk"];
+    if hit(FEISHU,app)||hit(FEISHU,id){return Some("Feishu");}
+    if hit(DING,app)||hit(DING,id){return Some("DingTalk");}
+    None
 }
 /// 停止信号独立于消息队列，断开后结束等待，不再读取通知。
 pub struct Notifications {
@@ -506,6 +524,18 @@ mod tests {
         drop(Notifications{incoming,stop});
         assert_eq!(stopped.try_recv(),Ok(()));
     }
+    #[test]
+    fn office_im_notifications_are_identified(){
+        assert_eq!(office_im_kind("飞书","Feishu"),Some("Feishu"));
+        assert_eq!(office_im_kind("Lark","Lark.Desktop"),Some("Feishu"));
+        assert_eq!(office_im_kind("钉钉","DingTalk"),Some("DingTalk"));
+        assert_eq!(office_im_kind("DingTalk","Alibaba.DingTalk"),Some("DingTalk"));
+        // 不相关的应用不应被误判。
+        assert_eq!(office_im_kind("微信","WeChat"),None);
+        assert_eq!(office_im_kind("Code","VSCode"),None);
+        assert_eq!(office_im_kind("",""),None);
+    }
+
     #[test]
     fn browser_minimal_recognizes_browsers_without_matching_electron_apps(){
         for name in ["chrome.exe","MSEDGE.EXE","firefox.exe","brave.exe","zen.exe","QQBrowser.exe","quark.exe","Quark.exe","QUARK.EXE"] {

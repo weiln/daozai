@@ -137,6 +137,8 @@ fn client_main_frame(source:crate::app::Messenger,class:&str,style:u32,extended:
     let known=match source {
         crate::app::Messenger::Qq=>matches!(class,"Chrome_WidgetWin_1"|"TXGuiFoundation"),
         crate::app::Messenger::Wechat=>class=="WeChatMainWndForPC" || class.starts_with("Qt") && class.ends_with("QWindowIcon"),
+        // 钉钉不走窗口查找（来自通知中心），不会进入这里。
+        crate::app::Messenger::DingTalk=>false,
     };
     let frame=(WS_SYSMENU|WS_MINIMIZEBOX).0;
     let resizable_frame=(WS_CAPTION|WS_THICKFRAME|WS_MINIMIZEBOX).0;

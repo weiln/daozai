@@ -1,4 +1,4 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -198,8 +198,8 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 10],
+    pub page_order: [usize; 10],
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
@@ -211,6 +211,8 @@ pub struct Settings {
     /// 微信缩在托盘时，点提醒通过系统托盘按钮唤起微信（默认关闭）。
     pub wechat_tray_open:bool,
     pub qq_only:bool,
+    /// 钉钉新消息提醒（走 Windows 通知中心）。
+    pub dingtalk_notifications:bool,
     pub notification_preview:bool,
     pub notifications: bool,
     pub sound: bool,
@@ -238,11 +240,32 @@ pub struct Settings {
     pub calendar_auto_sync: bool,
     /// 记录最近复制的文字（最近记录与固定条目均在本机保存）。
     pub clipboard_history: bool,
+    /// 剪贴板历史保留的未固定条目上限。
+    pub clipboard_max_recent: u32,
+    /// 快捷翻译：全局快捷键总开关与默认译向。
+    pub translate_enabled: bool,
+    pub translate_direction: crate::translate::Direction,
+    /// AI 状态灯：总开关与各工具开关（顺序同 AgentKind::ALL）。
+    pub agent_status_enabled: bool,
+    pub agent_status_agents: [bool; 5],
+    /// AI 用量与成本分析：总开关、统计口径（天）、收起态显示项。
+    pub ai_usage_enabled: bool,
+    pub ai_usage_days: i64,
+    pub ai_usage_hud: bool,
+    /// 系统监控：总开关、收起态 HUD。
+    pub sysmon_enabled: bool,
+    pub sysmon_hud: bool,
+    /// 通知智能聚合：免打扰时段、按应用静音（顺序同 NotifyApp::ALL）、摘要折叠。
+    pub dnd_enabled: bool,
+    pub dnd_start: u8,
+    pub dnd_end: u8,
+    pub mute_apps: [bool; 6],
+    pub notify_digest: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, dingtalk_notifications:true, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, clipboard_max_recent: 30, translate_enabled: true, translate_direction: Default::default(), agent_status_enabled: true, agent_status_agents: [true; 5], ai_usage_enabled: true, ai_usage_days: 7, ai_usage_hud: true, sysmon_enabled: true, sysmon_hud: true, dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
     }
 }
 
@@ -293,19 +316,24 @@ impl Settings {
                 "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
                 "resident_order" => {
                     let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
-                    if crate::bar_layout::valid_order(&order){s.resident_order=order;}
+                    // 兼容旧版 6 项顺序：自动补入「系统监控」组。
+                    if let Some(order)=crate::bar_layout::normalize_order(&order){s.resident_order=order;}
                 }
                 "page_order" => {
                     if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
-                            s.page_order.copy_from_slice(&order);
+                        // 兼容旧版 8 页的顺序：未出现的新页追加到末尾。
+                        if order.len()<=10 && order.iter().all(|p|*p<10) && order.iter().collect::<std::collections::HashSet<_>>().len()==order.len() {
+                            let mut full=order;
+                            for page in 0..10 { if !full.contains(&page) { full.push(page); } }
+                            s.page_order.copy_from_slice(&full);
                         }
                     }
                 }
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                // 兼容旧版 8 页：缺省的新页按旧逻辑置为可见。
+                "visible_pages" if (6..=10).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }
@@ -313,6 +341,7 @@ impl Settings {
                 "wechat_notifications" => s.wechat_notifications=v=="1",
                 "wechat_tray_open" => s.wechat_tray_open=v=="1",
                 "qq_only" => s.qq_only=v=="1",
+                "dingtalk_notifications" => s.dingtalk_notifications=v!="0",
                 "notification_preview" => s.notification_preview=v=="1",
                 "system_hud" => s.system_hud = v != "0",
                 "bluetooth_notifications" => s.bluetooth_notifications = v != "0",
@@ -338,6 +367,26 @@ impl Settings {
                 "calendar_prompt" => s.calendar_prompt = v != "0",
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
                 "clipboard_history" => s.clipboard_history = v != "0",
+                "clipboard_max_recent" => s.clipboard_max_recent = v.parse::<u32>().unwrap_or(30).clamp(5, 200),
+                "translate_enabled" => s.translate_enabled = v != "0",
+                "translate_direction" => s.translate_direction = crate::translate::Direction::parse(&v),
+                "agent_status_enabled" => s.agent_status_enabled = v != "0",
+                "agent_status_agents" if v.len() <= 5 && v.bytes().all(|b| b == b'0' || b == b'1') => {
+                    for (i, b) in v.bytes().enumerate() { s.agent_status_agents[i] = b == b'1'; }
+                    for i in v.len()..5 { s.agent_status_agents[i] = true; }
+                }
+                "ai_usage_enabled" => s.ai_usage_enabled = v != "0",
+                "ai_usage_days" => s.ai_usage_days = match v.parse::<i64>().unwrap_or(7) { 1 => 1, 30 => 30, _ => 7 },
+                "ai_usage_hud" => s.ai_usage_hud = v != "0",
+                "sysmon_enabled" => s.sysmon_enabled = v != "0",
+                "sysmon_hud" => s.sysmon_hud = v != "0",
+                "dnd_enabled" => s.dnd_enabled = v != "0",
+                "dnd_start" => s.dnd_start = v.parse::<u8>().unwrap_or(22).min(23),
+                "dnd_end" => s.dnd_end = v.parse::<u8>().unwrap_or(8).min(24),
+                "notify_digest" => s.notify_digest = v != "0",
+                "mute_apps" if v.len() <= 6 && v.bytes().all(|b| b == b'0' || b == b'1') => {
+                    for (i, b) in v.bytes().enumerate() { s.mute_apps[i] = b == b'1'; }
+                }
                 _ => {}
             }
         }
@@ -372,6 +421,7 @@ impl Settings {
                 ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
                 ("wechat_tray_open".into(),(self.wechat_tray_open as u8).to_string()),
                 ("qq_only".into(),(self.qq_only as u8).to_string()),
+                ("dingtalk_notifications".into(),(self.dingtalk_notifications as u8).to_string()),
                 ("notification_preview".into(),(self.notification_preview as u8).to_string()),
                 ("system_hud".into(), (self.system_hud as u8).to_string()),
                 ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
@@ -397,6 +447,21 @@ impl Settings {
                 ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
                 ("clipboard_history".into(), (self.clipboard_history as u8).to_string()),
+                ("clipboard_max_recent".into(), self.clipboard_max_recent.to_string()),
+                ("translate_enabled".into(), (self.translate_enabled as u8).to_string()),
+                ("translate_direction".into(), self.translate_direction.key().into()),
+                ("agent_status_enabled".into(), (self.agent_status_enabled as u8).to_string()),
+                ("agent_status_agents".into(), self.agent_status_agents.iter().map(|b| if *b {'1'} else {'0'}).collect()),
+                ("ai_usage_enabled".into(), (self.ai_usage_enabled as u8).to_string()),
+                ("ai_usage_days".into(), self.ai_usage_days.to_string()),
+                ("ai_usage_hud".into(), (self.ai_usage_hud as u8).to_string()),
+                ("sysmon_enabled".into(), (self.sysmon_enabled as u8).to_string()),
+                ("sysmon_hud".into(), (self.sysmon_hud as u8).to_string()),
+                ("dnd_enabled".into(), (self.dnd_enabled as u8).to_string()),
+                ("dnd_start".into(), self.dnd_start.to_string()),
+                ("dnd_end".into(), self.dnd_end.to_string()),
+                ("notify_digest".into(), (self.notify_digest as u8).to_string()),
+                ("mute_apps".into(), self.mute_apps.iter().map(|b| if *b {'1'} else {'0'}).collect()),
             ],
         );
     }

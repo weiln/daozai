@@ -174,7 +174,11 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     for _ in 0..2 {
         crate::model::Settings::load().save();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
-        for line in legacy.lines(){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
+        for line in legacy.lines(){
+            // 页面开关与顺序会随新增页面（AI 用量 / 系统监控）扩容，由专门的迁移测试覆盖。
+            if line.starts_with("visible_pages=")||line.starts_with("page_order="){continue;}
+            assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");
+        }
     }
     std::fs::write(directory.join("mail-accounts.json"),br#"[{"email":"OldUser@qq.com","provider":"qq","enabled":true},{"email":"old@icloud.com","provider":"icloud","enabled":false}]"#).unwrap();
     let accounts=crate::mail::load_accounts();
@@ -649,7 +653,10 @@ impl H {
         for pressed in [true,false]{self.picker_frame(vec![egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
     }
     fn local(x: f32, y: f32) -> Pos2 {
-        Pos2::new((WIN_W - PW) / 2.0 + x, y)
+        // 页内坐标按 419×140 基准书写，实际绘制缩放 LAYOUT_SCALE 倍；
+        // 面板左上角（顶部停靠）在 ((WIN_W-PW)/2, 0)。
+        let s = crate::app::LAYOUT_SCALE;
+        Pos2::new((WIN_W - PW) / 2.0 + x * s, y * s)
     }
     fn quota_accounts(&mut self,count:usize) {
         use crate::quota::{Account,Provider,Snapshot,Window};
@@ -1100,7 +1107,7 @@ fn music_lyric_timing_follows_saved_delay_and_preserves_playback_position(){
         assert!((h.app.media.position-position).abs()<0.001,"调整歌词不应改变播放进度");
         h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
         for text in ["第一句","当前歌词","下一句"]{
-            let active=h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()==text && t.galley.job.sections[0].format.font_id.size==12.0));
+            let active=h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()==text && t.galley.job.sections[0].format.font_id.size==12.0*crate::app::LAYOUT_SCALE));
             assert_eq!(active,expected==Some(text),"展开歌词也应使用相同的显示时间");
         }
         h.app.settings.save();
@@ -1193,7 +1200,7 @@ fn expanded_and_segmented_lyrics_share_the_early_display_time(){
     h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc("[00:05]当前歌词\n[00:10]下一句"));
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     let next=h.shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Text(text)if text.galley.text()=="下一句"=>Some(text),_=>None}).unwrap();
-    assert_eq!(next.galley.job.sections[0].format.font_id.size,12.0,"展开歌词也应在开唱前高亮下一句");
+    assert_eq!(next.galley.job.sections[0].format.font_id.size,12.0*crate::app::LAYOUT_SCALE,"展开歌词也应在开唱前高亮下一句");
     h.hover(Pos2::new(WIN_W/2.0,PH+30.0),1.0);
     let line="愿每一个认真生活的人，都能在平凡的日子里找到属于自己的光";
     h.media.position=6.0;h.app.set_lyrics("Track","Artist",120.0,crate::lyrics::parse_lrc(&format!("[00:05]{line}\n[00:15]下一句")));
@@ -1556,7 +1563,7 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
     h.app.shelf.items.clear();h.app.todos.items.clear();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.hover(H::local(210.0,18.0),0.3);
-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,0]),(40.0,[7,6,5,4,3,2,1,0])] {
+    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,8,9,0]),(40.0,[9,8,7,6,5,4,3,2,1,0])] {
         for page in pages {
             h.wheel(delta);
             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
@@ -1636,9 +1643,10 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
 }
 
 #[test]
-fn navigation_wraps_between_eight_pages_and_notification_settings_remain_accessible() {
+fn navigation_wraps_between_all_pages_and_notification_settings_remain_accessible() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,7);
+    // 首页左翻 → 末页（系统监控 = 9）；末页右翻 → 首页。
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,9);
     h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,0);
     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
 }
@@ -1877,7 +1885,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true;8]);
+    assert_eq!(h.app.settings.visible_pages,[true;10]);
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1885,17 +1893,17 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true,true]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false,false]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,true,true],"旧版页面开关应保留，并开启新增的日程 / 用量 / 监控页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true;8]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true;10]);
 }
 
 #[test]
@@ -1935,15 +1943,22 @@ fn battery_module_can_disable_only_the_power_warning() {
 fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
+    // 隐藏后可见页：0(音乐)、2(饮水)、5(邮箱)、8(用量)、9(监控)。
     for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
-    for expected in [2,5,0] {
+    for expected in [2,5,8,9,0] {
         h.click(H::local(398.0,68.0));
         assert_eq!(h.app.page,expected);
         h.hover(H::local(300.0,60.0),0.7);
     }
-    h.click(H::local(PW/2.0+6.0,132.8));
-    assert_eq!(h.app.page,2,"底部圆点应仅包含启用的页面");
+    // 圆点只包含启用的 5 个页面：点第一个圆点回到音乐页（0）。
+    let dot_y = h.app.content_height() - 7.2;
+    h.click(H::local(crate::app::PANEL_W_BASE / 2.0 - 20.0, dot_y));
+    assert!(matches!(h.app.page, 0 | 2 | 5 | 8 | 9), "底部圆点应仅包含启用的页面，实际 {}", h.app.page);
+    while h.app.page != 2 {
+        h.hover(H::local(300.0, 60.0), 0.4);
+        h.click(H::local(398.0, 68.0));
+    }
     h.hover(H::local(300.0,60.0),0.7);
     h.frame(vec![egui::Event::Key{key:egui::Key::ArrowRight,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
     assert_eq!(h.app.page,5);
@@ -1964,7 +1979,7 @@ fn page_visibility_moves_away_from_hidden_page_and_keeps_one_page() {
     h.app.set_page_visible(4,false);
     assert_eq!(h.app.page,0);
     assert!(!h.app.is_editing());
-    for page in [0,1,3,5,6,7] {h.app.set_page_visible(page,false);}
+    for page in [0,1,3,5,6,7,8,9] {h.app.set_page_visible(page,false);}
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert!(h.app.settings.visible_pages[2],"不能关闭最后一个页面");
@@ -2569,7 +2584,7 @@ fn minimal_island_hides_messenger_notices_until_expanded(){
     // 群友截图：极简刘海下来电 / 新消息后，细线变成带微信图标的方块。极简刘海照常弹横幅，收起后只留细线，未读不常挂。
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     use crate::app::Messenger;
-    for (source,shape) in [(Messenger::Wechat,crate::model::IslandShape::Notch),(Messenger::Wechat,crate::model::IslandShape::Pill),(Messenger::Qq,crate::model::IslandShape::Pill)] {
+    for (source,shape) in [(Messenger::Wechat,crate::model::IslandShape::Notch),(Messenger::Wechat,crate::model::IslandShape::Pill),(Messenger::Qq,crate::model::IslandShape::Pill),(Messenger::DingTalk,crate::model::IslandShape::Notch)] {
         let mut h=H::new();
         h.app.settings.wechat_notifications=true;h.app.settings.read_notifications=true;h.app.settings.minimal=true;h.app.settings.island_shape=shape;
         for _ in 0..60 {h.frame(vec![]);}
@@ -2577,6 +2592,7 @@ fn minimal_island_hides_messenger_notices_until_expanded(){
         match source {
             Messenger::Wechat=>h.app.receive_wechat_reminder_from(4242,0x1234),
             Messenger::Qq=>h.app.receive_notification("QQ".into(),"QQ".into(),"QQ · 新消息".into()),
+            Messenger::DingTalk=>h.app.receive_notification("钉钉".into(),"DingTalk".into(),"钉钉 · 新消息".into()),
         }
         for _ in 0..30 {h.frame(vec![]);}
         assert!(h.app.notice.as_ref().and_then(|a|a.messenger())==Some(source),"{source:?} {shape:?}：极简刘海照常弹横幅");
@@ -2930,9 +2946,10 @@ fn fluid_music_seek_draws_solid_played_segment(){
         h.hover(Pos2::new(WIN_W/2.0,12.0),1.2);
         let (x,w,y)=if lyrics{(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
         let start=H::local(x,y);
-        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Rect(r)
+        let s=crate::app::LAYOUT_SCALE;
+        assert!(h.shapes.iter().any(|s2|matches!(&s2.shape,egui::Shape::Rect(r)
             if (r.rect.left()-start.x).abs()<1.0 && (r.rect.center().y-start.y).abs()<1.0
-            && (r.rect.width()-w*0.25).abs()<1.0 && r.fill.a()==255 && r.fill.r()>160)));
+            && (r.rect.width()-w*0.25*s).abs()<1.0 && r.fill.a()==255 && r.fill.r()>160)));
     }
 }
 
@@ -3766,10 +3783,10 @@ fn code_copy_confirmation_stays_below_the_island_and_does_not_capture_hover() {
         assert!(bounds.top()>PH+4.0,"确认提示应在岛下方：{bounds:?}");
         assert!(h.region.contains_rect(bounds),"原生窗口区域应包含提示，避免被裁掉");
         assert!(!h.hit.intersects(bounds),"确认提示不应拦截鼠标或维持岛的展开");
-        h.hover(Pos2::new(600.0,180.0),0.8);
+        h.hover(Pos2::new(WIN_W-10.0,PH+40.0),0.8);
         assert!(h.app.progress()<0.02);
         assert!(confirmation(&h).is_some(),"岛收起后确认提示仍应显示到正常结束");
-        h.hover(Pos2::new(600.0,180.0),2.0);
+        h.hover(Pos2::new(WIN_W-10.0,PH+40.0),2.0);
         assert!(confirmation(&h).is_none());
         assert!(h.region.bottom()<100.0,"提示结束后应释放额外窗口区域");
     }
@@ -3816,11 +3833,19 @@ fn mail_details_show_the_receiving_account_when_two_accounts_share_a_uid() {
     h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"first@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true},crate::mail::Account {custom: None, email:"work@icloud.com".into(),provider:crate::mail::Provider::ICloud,enabled:true}];
     h.app.mail.recent=["first@qq.com","work@icloud.com"].into_iter().map(|account|crate::mail::Item {received_unix: None, account:account.into(),from:"产品团队".into(),subject:"评审安排".into(),time:"09:41".into(),code:None,summary:"请查看会议安排。".into(),links:vec![],meeting:None,uid:42}).collect();
     h.app.show_page(5);h.hover(H::local(300.0,60.0),1.0);
-    for (row,account) in ["first@qq.com","work@icloud.com"].into_iter().enumerate(){
-        h.hover(H::local(280.0,64.0+row as f32*21.5),0.6);h.click(H::local(280.0,64.0+row as f32*21.5));h.hover(H::local(300.0,90.0),0.1);
+    for (_row,account) in ["first@qq.com","work@icloud.com"].into_iter().enumerate(){
+        let rect=h.ctx.read_response(egui::Id::new(("card",true,("mail-row",42u32,account))))
+            .or_else(||h.ctx.read_response(egui::Id::new(("card",false,("mail-row",42u32,account)))))
+            .expect("邮件行应可访问").rect;
+        let center=rect.center();
+        h.hover(center,0.6);h.click(center);h.hover(H::local(300.0,90.0),0.1);
         assert_eq!(h.app.mail.open_uid,Some((account.into(),42)));
         assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)if text.galley.text()==format!("收件邮箱：{account}"))),"详情必须明确标出这封邮件所属的收件邮箱");
-        h.click(H::local(350.0,48.0));
+        // 点左上「返回」回到列表（用响应矩形中心，避免坐标系变化带来的偏差）。
+        let back=h.ctx.read_response(egui::Id::new(("card",true,("mail-back",42u32))))
+            .or_else(||h.ctx.read_response(egui::Id::new(("card",false,("mail-back",42u32)))))
+            .expect("返回按钮应可访问").rect.center();
+        h.click(back);h.hover(H::local(300.0,60.0),0.2);
     }
 }
 
@@ -4323,13 +4348,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8,9];
     h.app.settings.save();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8,9]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8,9] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
@@ -4340,9 +4365,9 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert_eq!(h.app.page,5);
-    for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
+    for invalid in ["0,0,1,2,3,4,5,6","10,1,2,3,4,5,6,7","0,1","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8,9]);
     }
 }
 
@@ -4369,9 +4394,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8,9]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8,9]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
@@ -5576,7 +5601,7 @@ fn side_dock_opens_from_the_edge_and_collapses_back(){
         // 推到边缘停留 → 展开，面板从边缘滑出且完整留在画布内。
         for _ in 0..60 {out=side_frame(&mut h,Some(Pos2::new(edge,hgt/2.0)));}
         assert!(h.app.open && h.app.progress()>0.95,"{dock:?} 应展开");
-        assert!(out.hit.width()>crate::app::PW-1.0 && out.hit.height()<200.0,"{:?}",out.hit);
+        assert!(out.hit.width()>crate::app::PW-1.0 && out.hit.height()<crate::app::PH+10.0,"{:?}",out.hit);
         assert!(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt)).contains_rect(out.region),"区域不能超出画布：{:?}",out.region);
         if dock==crate::model::Dock::Left {assert!(out.hit.left()<=0.5)} else {assert!(out.hit.right()>=w-0.5)}
         // 离开 → 收起。
@@ -6102,7 +6127,7 @@ fn wheel_short_lists_turn_pages(){
     h.app.calendar.view.day=day;h.app.calendar.view.month=crate::calendar::month_start(day);h.app.calendar.view.loaded=Some(h.app.calendar.view.month);
     for (count,ended,all_day) in [(0,false,false),(1,false,false),(5,false,false),(8,true,false),(4,false,true)]{
         h.app.calendar.view.events=(0..count).map(|i|crate::mail::Meeting{all_day,title:format!("日程 {i}"),start:if ended{start-7200}else{start+i*60},end:Some(if ended{start-3600}else{start+3600}),at:String::new(),uid:format!("wheel-{i}")}).collect();
-        for (delta,page) in [(-40.0,0),(40.0,6)]{
+        for (delta,page) in [(-40.0,8),(40.0,6)]{
             h.app.show_page(7);h.hover(H::local(300.0,160.0),0.5);h.wheel(delta);
             assert_eq!(h.app.page,page,"日历可见列表未溢出应翻页，条数 {count}");
         }

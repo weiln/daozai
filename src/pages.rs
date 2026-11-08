@@ -643,10 +643,20 @@ impl App {
             } else {
                 c.circle(58.0, y, 2.2, Color32::from_gray(110));
             }
-            let text = c.fit(&crate::clipboard::preview(&clip.text), size::BODY, W::Regular, 210.0);
+            let is_image = clip.kind == crate::clipboard::ClipKind::Image;
+            let text = if is_image {
+                let mut s = String::from("🖼 图片");
+                if !clip.note.is_empty() { s.push_str(&format!(" · {}", clip.note)); }
+                s
+            } else {
+                let mut s = crate::clipboard::preview(&clip.text);
+                if !clip.note.is_empty() { s = format!("[{}] {}", clip.note, s); }
+                s
+            };
+            let text = c.fit(&text, size::BODY, W::Regular, 210.0);
             c.text(68.0, y + 3.8, &text, size::BODY, W::Regular, Color32::from_gray(235), H::Left);
             c.text(318.0, y + 3.5, &clip.at, size::TINY, W::Regular, theme::DIM, H::Right);
-            let tip: String = clip.text.chars().take(400).collect();
+            let tip: String = if is_image { clip.note.clone() } else { clip.text.chars().take(400).collect() };
             let r = r.on_hover_text(format!("{tip}{}\n点击复制", if clip.text.chars().count() > 400 { "…" } else { "" }));
             let pin = c.hit(323.0, y - 9.0, 18.0, 18.0, ("clip-pin", index)).on_hover_text(if clip.pinned { "取消固定" } else { "固定（清空时保留）" });
             paint::pin(c, 332.0, y, 9.0, if clip.pinned || pin.hovered() { theme::BLUE } else { theme::GRAY });
@@ -658,10 +668,19 @@ impl App {
         }
         match action {
             Some((index, 0)) => {
+                let clip = &items[index];
+                let payload = match clip.kind {
+                    crate::clipboard::ClipKind::Image => clip
+                        .image
+                        .as_ref()
+                        .map(|b| crate::clipboard::blobs_dir().join(b).display().to_string())
+                        .unwrap_or_default(),
+                    crate::clipboard::ClipKind::Text => clip.text.clone(),
+                };
                 #[cfg(windows)]
-                self.say(if crate::clipboard::copy_history(&items[index].text) { "已复制" } else { "复制失败，请重试" });
+                self.say(if crate::clipboard::copy_history(&payload) { if clip.kind == crate::clipboard::ClipKind::Image { "已复制图片路径" } else { "已复制" } } else { "复制失败，请重试" });
                 #[cfg(not(windows))]
-                _cmds.push(Cmd::Copy(items[index].text.clone()));
+                _cmds.push(Cmd::Copy(payload));
             }
             Some((index, 1)) => {
                 if !self.clipboard.lock().toggle_pin(index) { self.say(format!("最多固定 {} 条", crate::clipboard::MAX_PINNED)); }

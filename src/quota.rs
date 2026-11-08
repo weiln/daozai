@@ -25,7 +25,7 @@ impl Discovery {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek }
 impl Provider {
     pub const ALL: [Self; 8] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek];
@@ -326,7 +326,7 @@ impl Service {
         None
     }
 }
-fn http_agent()->ureq::Agent{
+pub(crate) fn http_agent()->ureq::Agent{
     let mut builder=ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).redirects(0);
     let proxy=["HTTPS_PROXY","https_proxy","ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy"].iter().find_map(|key|std::env::var(key).ok().filter(|s|!s.is_empty())).or_else(system_proxy);
     if let Some(proxy)=proxy.and_then(|s|ureq::Proxy::new(s).ok()){builder=builder.proxy(proxy);}

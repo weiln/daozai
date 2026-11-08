@@ -16,48 +16,115 @@ pub const MAX_RECENT: usize = 30;
 pub const MAX_CHARS: usize = 20_000;
 pub const MAX_PINNED: usize = 20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ClipKind {
+    #[default]
+    Text,
+    Image,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Clip {
+    /// 文本内容；图片条目为空字符串（缩略由 `image` 表示）。
     pub text: String,
     /// 本地时间 `HH:MM`。
     pub at: String,
     pub pinned: bool,
+    pub kind: ClipKind,
+    /// 用户备注（可为空）。
+    pub note: String,
+    /// 图片条目：`%APPDATA%\Daozai\clipboard-blobs\<hash>.png` 的文件名（不含目录）。
+    pub image: Option<String>,
 }
 
-#[derive(Debug, Default)]
+impl Clip {
+    /// 搜索匹配：文字 / 备注 / 图片标记。
+    pub fn matches(&self, query: &str) -> bool {
+        if query.trim().is_empty() {
+            return true;
+        }
+        let q = query.to_lowercase();
+        match self.kind {
+            ClipKind::Text => self.text.to_lowercase().contains(&q) || self.note.to_lowercase().contains(&q),
+            ClipKind::Image => self.note.to_lowercase().contains(&q) || q == "图片" || "image".contains(&q),
+        }
+    }
+}
+
+/// 图片 blob 目录。
+pub fn blobs_dir() -> std::path::PathBuf {
+    crate::model::config_dir().join("clipboard-blobs")
+}
+
+#[derive(Debug)]
 pub struct History {
     pub items: Vec<Clip>,
     /// 每次变化 +1，界面据此判断是否需要重绘。
     pub version: u64,
+    /// 未固定条目上限（可在设置中配置）。
+    pub max_recent: usize,
     path: Option<std::path::PathBuf>,
 }
 
+impl Default for History {
+    fn default() -> Self {
+        Self { items: Vec::new(), version: 0, max_recent: MAX_RECENT, path: None }
+    }
+}
+
 impl History {
-    /// 新内容放最前；同样的文字只留一条（移到最前、保留固定状态）。
+    /// 新文字放最前；同样的文字只留一条（移到最前、保留固定状态）。
     pub fn push(&mut self, text: &str, at: &str) -> bool {
         if text.trim().is_empty() || text.chars().count() > MAX_CHARS { return false; }
-        let pinned = match self.items.iter().position(|c| c.text == text) {
+        let pinned = match self.items.iter().position(|c| c.kind == ClipKind::Text && c.text == text) {
             Some(0) => return false,
             Some(i) => self.items.remove(i).pinned,
             None => false,
         };
-        self.items.insert(0, Clip { text: text.to_string(), at: at.to_string(), pinned });
-        let mut recent = 0;
-        self.items.retain(|c| c.pinned || { recent += 1; recent <= MAX_RECENT });
+        self.items.insert(0, Clip { text: text.to_string(), at: at.to_string(), pinned, kind: ClipKind::Text, note: String::new(), image: None });
+        self.trim();
         self.changed();
         true
     }
 
+    /// 新图片放最前（按 blob 文件名去重，同图移到最前）。
+    pub fn push_image(&mut self, blob: &str, at: &str) -> bool {
+        if blob.is_empty() { return false; }
+        let pinned = match self.items.iter().position(|c| c.kind == ClipKind::Image && c.image.as_deref() == Some(blob)) {
+            Some(0) => return false,
+            Some(i) => self.items.remove(i).pinned,
+            None => false,
+        };
+        self.items.insert(0, Clip { text: String::new(), at: at.to_string(), pinned, kind: ClipKind::Image, note: String::new(), image: Some(blob.to_string()) });
+        self.trim();
+        self.changed();
+        true
+    }
+
+    fn trim(&mut self) {
+        let cap = self.max_recent.max(1);
+        let mut recent = 0;
+        self.items.retain(|c| c.pinned || { recent += 1; recent <= cap });
+    }
+
     pub fn remove(&mut self, index: usize) {
         if index < self.items.len() {
-            self.items.remove(index);
+            let item = self.items.remove(index);
+            // 删除图片 blob。
+            if let Some(blob) = item.image {
+                let _ = std::fs::remove_file(blobs_dir().join(blob));
+            }
             self.changed();
         }
     }
 
     /// 清空未固定的条目，固定的保留。
     pub fn clear_recent(&mut self) {
-        self.items.retain(|c| c.pinned);
+        let mut removed = Vec::new();
+        self.items.retain(|c| {
+            if c.pinned { true } else { if let Some(b) = &c.image { removed.push(b.clone()); } false }
+        });
+        for blob in removed { let _ = std::fs::remove_file(blobs_dir().join(blob)); }
         self.changed();
     }
 
@@ -70,18 +137,52 @@ impl History {
         true
     }
 
+    /// 设置条目备注。
+    pub fn set_note(&mut self, index: usize, note: &str) {
+        if let Some(item) = self.items.get_mut(index) {
+            item.note = note.trim().to_string();
+            self.changed();
+        }
+    }
+
+    /// 按 query 过滤出条目下标（保持顺序）。
+    pub fn search_indices(&self, query: &str) -> Vec<usize> {
+        self.items.iter().enumerate().filter(|(_, c)| c.matches(query)).map(|(i, _)| i).collect()
+    }
+
     fn to_json(&self) -> Vec<u8> {
-        let rows: Vec<_> = self.items.iter().map(|c| serde_json::json!({"pinned": c.pinned,"text": c.text, "at": c.at})).collect();
+        let rows: Vec<_> = self.items.iter().map(|c| serde_json::json!({
+            "pinned": c.pinned,
+            "text": c.text,
+            "at": c.at,
+            "kind": if c.kind == ClipKind::Image { "image" } else { "text" },
+            "note": c.note,
+            "image": c.image,
+        })).collect();
         serde_json::to_vec(&rows).unwrap_or_default()
     }
 
     pub fn from_json(raw: &[u8]) -> Self {
         let rows: Vec<serde_json::Value> = serde_json::from_slice(raw).unwrap_or_default();
-        let items = rows.iter().filter_map(|row| Some(Clip {
-            text: row.get("text")?.as_str()?.to_string(),
-            at: row.get("at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            pinned: row.get("pinned").and_then(|v| v.as_bool()).unwrap_or(true),
-        })).filter(|c| !c.text.is_empty()).take(MAX_PINNED + MAX_RECENT).collect();
+        let items = rows.iter().filter_map(|row| {
+            let kind = match row.get("kind").and_then(|v| v.as_str()) {
+                Some("image") => ClipKind::Image,
+                _ => ClipKind::Text,
+            };
+            let text = row.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let image = row.get("image").and_then(|v| v.as_str()).map(str::to_string);
+            // 文本条目必须有文字；图片条目必须有 blob。
+            if kind == ClipKind::Text && text.is_empty() { return None; }
+            if kind == ClipKind::Image && image.is_none() { return None; }
+            Some(Clip {
+                text,
+                at: row.get("at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                pinned: row.get("pinned").and_then(|v| v.as_bool()).unwrap_or(true),
+                kind,
+                note: row.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                image,
+            })
+        }).take(MAX_PINNED + MAX_RECENT).collect();
         Self { items, ..Self::default() }
     }
 
@@ -115,7 +216,9 @@ pub struct Shared {
 
 impl Shared {
     pub fn new(enabled: bool) -> Self {
-        Self { history: Arc::new(Mutex::new(History::load())), enabled: Arc::new(AtomicBool::new(enabled)) }
+        let mut history = History::load();
+        history.max_recent = crate::model::Settings::load().clipboard_max_recent as usize;
+        Self { history: Arc::new(Mutex::new(history)), enabled: Arc::new(AtomicBool::new(enabled)) }
     }
     pub fn set_enabled(&self, on: bool) { self.enabled.store(on, Ordering::Relaxed); }
     pub fn is_enabled(&self) -> bool { self.enabled.load(Ordering::Relaxed) }
@@ -129,6 +232,20 @@ impl Shared {
         if !self.is_enabled() { return false; }
         let at = chrono::Local::now().format("%H:%M").to_string();
         self.lock().push(text, &at)
+    }
+    /// 记录一张图片（PNG 字节）。返回是否新增。
+    pub fn record_image(&self, png: &[u8]) -> bool {
+        if !self.is_enabled() || png.is_empty() { return false; }
+        use ring::digest;
+        let digest = digest::digest(&digest::SHA256, png);
+        let hash: String = digest.as_ref().iter().take(16).map(|b| format!("{b:02x}")).collect();
+        let blob = format!("{hash}.png");
+        let dir = blobs_dir();
+        if std::fs::create_dir_all(&dir).is_err() { return false; }
+        let path = dir.join(&blob);
+        if !path.exists() && std::fs::write(&path, png).is_err() { return false; }
+        let at = chrono::Local::now().format("%H:%M").to_string();
+        self.lock().push_image(&blob, &at)
     }
 }
 
@@ -165,6 +282,56 @@ pub fn copy_history(text: &str) -> bool {
     raw::set_string(text).is_ok() && raw::set_without_clear(format.get(), &[1]).is_ok()
 }
 
+/// 解析 CF_DIB（BITMAPINFOHEADER）为 RGBA 图像并编码 PNG。仅支持未压缩的 24/32 位 BI_RGB。
+/// 失败返回 None。纯逻辑，可单测。
+pub fn decode_dib(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 40 {
+        return None;
+    }
+    let u32_at = |o: usize| -> u32 { u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) };
+    let i32_at = |o: usize| -> i32 { i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) };
+    let header_size = u32_at(0) as usize;
+    if header_size < 40 {
+        return None;
+    }
+    let width = i32_at(4);
+    let height = i32_at(8);
+    let bpp = u16::from_le_bytes([data[14], data[15]]) as u32;
+    let compression = u32_at(16);
+    if width <= 0 || height == 0 || compression != 0 {
+        return None;
+    }
+    let top_down = height < 0;
+    let h = height.unsigned_abs() as usize;
+    let w = width as usize;
+    if bpp != 24 && bpp != 32 {
+        return None;
+    }
+    let bytes_pp = (bpp / 8) as usize;
+    let row_bytes = (w * bytes_pp + 3) & !3; // 4 字节对齐
+    let pixel_offset = header_size; // BI_RGB 无调色板时紧随头
+    let needed = pixel_offset + row_bytes * h;
+    if data.len() < needed {
+        return None;
+    }
+    let mut img = image::RgbaImage::new(w as u32, h as u32);
+    for row in 0..h {
+        let src_row = if top_down { row } else { h - 1 - row };
+        let base = pixel_offset + src_row * row_bytes;
+        for col in 0..w {
+            let p = base + col * bytes_pp;
+            let b = data[p];
+            let g = data[p + 1];
+            let r = data[p + 2];
+            let a = if bytes_pp == 4 { data[p + 3] } else { 255 };
+            img.put_pixel(col as u32, row as u32, image::Rgba([r, g, b, a]));
+        }
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
+}
+
 #[cfg(windows)]
 mod win {
     use super::Shared;
@@ -189,6 +356,9 @@ mod win {
                     if state.shared.is_enabled() {
                         if let Some((text, from_history)) = read_text(hwnd) {
                             if state.shared.record_update(&text, from_history) { (state.repaint)(); }
+                        } else if let Some(png) = read_image(hwnd) {
+                            // 仅在有图片且无文字（或图片优先）时记录图片。
+                            if state.shared.record_image(&png) { (state.repaint)(); }
                         }
                     }
                 }
@@ -243,6 +413,33 @@ mod win {
         })();
         let _ = CloseClipboard();
         text
+    }
+
+    /// 读取剪贴板中的位图（CF_DIB），转换为 RGBA 并编码为 PNG。
+    /// 不支持 CF_DIB 或解码失败时返回 None（静默跳过）。
+    unsafe fn read_image(hwnd: HWND) -> Option<Vec<u8>> {
+        const CF_DIB: u32 = 8;
+        if IsClipboardFormatAvailable(CF_DIB).is_err() { return None; }
+        let mut opened = false;
+        for _ in 0..5 {
+            if OpenClipboard(hwnd).is_ok() { opened = true; break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !opened { return None; }
+        let png = (|| {
+            if excluded() { return None; }
+            let handle = GetClipboardData(CF_DIB).ok()?;
+            let memory = HGLOBAL(handle.0);
+            let base = GlobalLock(memory) as *const u8;
+            if base.is_null() { return None; }
+            let size = GlobalSize(memory);
+            let bytes = std::slice::from_raw_parts(base, size);
+            let result = super::decode_dib(bytes);
+            let _ = GlobalUnlock(memory);
+            result
+        })();
+        let _ = CloseClipboard();
+        png
     }
 
     pub fn run(shared: Shared, repaint: Box<dyn Fn() + Send>) -> windows::core::Result<()> {
@@ -327,5 +524,63 @@ mod tests {
         assert_eq!(back.items, h.items);
         assert_eq!(preview(&back.items[1].text), "第一行 第二行 末尾");
         assert!(History::from_json(b"not json").items.is_empty());
+    }
+
+    #[test]
+    fn image_and_note_and_search() {
+        let mut h = History::default();
+        h.push("hello world", "08:00");
+        h.push_image("abc.png", "08:01");
+        h.push("密码：123", "08:02");
+        h.set_note(0, "重要链接");
+        assert_eq!(h.items[0].note, "重要链接");
+        // 搜索：文字命中。注意图片条目在 index1。
+        let idx = h.search_indices("hello");
+        assert_eq!(idx, vec![2]);
+        // 备注命中。
+        let idx = h.search_indices("重要");
+        assert_eq!(idx, vec![0]);
+        // 图片标记命中。
+        let idx = h.search_indices("图片");
+        assert_eq!(idx, vec![1]);
+        // 空查询返回全部。
+        assert_eq!(h.search_indices("").len(), 3);
+        // JSON 往返保留 kind/note/image。
+        let back = History::from_json(&h.to_json());
+        assert_eq!(back.items, h.items);
+        assert_eq!(back.items[1].kind, ClipKind::Image);
+        assert_eq!(back.items[1].image.as_deref(), Some("abc.png"));
+    }
+
+    #[test]
+    fn image_dedupes_and_caps() {
+        let mut h = History::default();
+        h.max_recent = 2;
+        assert!(h.push_image("a.png", "08:00"));
+        assert!(!h.push_image("a.png", "08:01")); // 与最新相同不重复
+        assert!(h.push_image("b.png", "08:02"));
+        assert!(h.push("文字", "08:03"));
+        // 上限 2 条未固定。
+        assert_eq!(h.items.iter().filter(|c| !c.pinned).count(), 2);
+    }
+
+    #[test]
+    fn decode_dib_minimal_24bpp() {
+        // 构造一个 2x1 24bpp 的 BITMAPINFOHEADER + 像素（行对齐到 4 字节）。
+        // 行字节 = 2*3=6 → 对齐 8。
+        let mut data = Vec::new();
+        data.extend_from_slice(&40u32.to_le_bytes()); // biSize
+        data.extend_from_slice(&2i32.to_le_bytes()); // width
+        data.extend_from_slice(&1i32.to_le_bytes()); // height (bottom-up)
+        data.extend_from_slice(&1u16.to_le_bytes()); // planes
+        data.extend_from_slice(&24u16.to_le_bytes()); // bpp
+        data.extend_from_slice(&0u32.to_le_bytes()); // compression BI_RGB
+        data.extend_from_slice(&[0u8; 40 - 20]); // 剩余 header 字段
+        // 像素 BGR：红、绿 + 2 字节对齐填充
+        data.extend_from_slice(&[0, 0, 255, 0, 255, 0, 0, 0]);
+        let png = decode_dib(&data).expect("应能解码");
+        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+        // 非法数据返回 None。
+        assert!(decode_dib(&[0u8; 10]).is_none());
     }
 }

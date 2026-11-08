@@ -1,5 +1,5 @@
 //! 同心额度环、账号选择及账号设置。
-use crate::{app::{App,Cmd},extras::{setting_row,settings_card,settings_control_row},paint::{Card,H},quota::{self,Accent,Account,Config,Provider,Snapshot},theme::{self,W}};
+use crate::{app::{App,Cmd},extras::{setting_row,settings_card,settings_control_row,settings_label,settings_hint},paint::{Card,H},quota::{self,Accent,Account,Config,Provider,Snapshot},theme::{self,W}};
 use eframe::egui::{self,Color32};
 use std::collections::{HashMap,HashSet};
 use chrono::Datelike;
@@ -73,6 +73,8 @@ fn accent_color(accent:Accent,provider:Provider)->Color32{
     let (r,g,b)=match accent{Accent::Brand|Accent::Violet=>(142,67,255),Accent::Orange=>(255,116,26),Accent::Blue=>(40,126,255),Accent::Cyan=>(0,213,242),Accent::Pink=>(255,43,132),Accent::Gold=>(255,190,0),Accent::Green=>(52,221,145)};
     Color32::from_rgb(r,g,b)
 }
+/// 供其它页面复用的账号主色（主色 + 提亮色）。
+pub(crate) fn accent_pair(config:&Config,a:&Account)->[Color32;2]{accent_colors(config,a)}
 fn accent_colors(config:&Config,a:&Account)->[Color32;2]{
     let main=accent_color(config.colors.get(&a.id).copied().unwrap_or_default(),a.provider);
     [main,crate::paint::mix(main,Color32::WHITE,0.16)]
@@ -227,6 +229,50 @@ impl App {
             let extra=if let Some(text)=self.quota.balance_text(&account.id){ctx.fonts(|fonts|fonts.layout_no_wrap(text,theme::font(theme::size::PILL_CLOCK,W::Bold),theme::WHITE).size().x).ceil()+6.0}else if self.quota.balance_loading(&account.id){22.0}else{0.0};Some((position,extra))
         }).collect()
     }
+    /// 收起态的系统监控环：CPU（蓝）与内存（青），排在额度环之前。
+    pub(crate) fn draw_sysmon_bar(&mut self,c:&Card,cx:f32,layout:&crate::bar_layout::Layout){
+        use crate::sysmon::Reading;
+        // 内存环排第二（更靠内），CPU 在前。
+        let items=[(crate::bar_layout::sysmon_slot(0),"C",self.sysmon.cpu.clone(),Color32::from_rgb(40,130,255)),
+                   (crate::bar_layout::sysmon_slot(1),"M",self.sysmon.mem_ratio.clone(),Color32::from_rgb(0,200,190)),
+                   (crate::bar_layout::sysmon_slot(2),"G",self.sysmon.gpu.clone(),Color32::from_rgb(200,110,220))];
+        for (slot,label,reading,color) in items {
+            let Some(x)=layout.x[slot].map(|x|cx+x) else{continue};
+            let alpha=layout.pet_clearance(slot);
+            let faded=c.faded(alpha);let c=&faded;
+            let stroke=2.6_f32;
+            let radius=27.0/2.0-stroke/2.0-1.0;
+            let start=-std::f32::consts::FRAC_PI_2;
+            let dark=crate::paint::mix(color,Color32::BLACK,0.78);
+            match reading {
+                Reading::Known(v)=>{
+                    let frac=(v as f32/100.0).clamp(0.0,1.0);
+                    if frac>=0.999 {c.ring(x,15.0,radius,stroke,color);}
+                    else if frac<=0.001 {c.ring(x,15.0,radius,stroke,dark);}
+                    else {
+                        let end=start+std::f32::consts::TAU*frac;
+                        c.arc(x,15.0,radius,end,start+std::f32::consts::TAU,stroke,dark);
+                        c.arc(x,15.0,radius,start,end,stroke,color);
+                    }
+                    // 环内字母 + 百分比
+                    c.centered_text(x,14.0,label,7.5,W::Bold,Color32::from_gray(200),H::Center);
+                    c.centered_text(x,20.5,&format!("{v:.0}"),7.0,W::Semibold,theme::WHITE,H::Center);
+                }
+                Reading::Unknown(_)=>{
+                    // 不可读：灰环 + 破折号，绝不伪造 0。
+                    c.ring(x,15.0,radius,stroke,Color32::from_gray(58));
+                    c.centered_text(x,15.0,label,7.5,W::Bold,Color32::from_gray(130),H::Center);
+                }
+            }
+            let full=match label {"C"=>"CPU","G"=>"GPU",_=>"内存"};
+            let tip=match &reading {
+                Reading::Known(v)=>format!("{full} {v:.0}%"),
+                Reading::Unknown(_)=>format!("{full} 暂不可读"),
+            };
+            bar_tooltip(c.hit(x-14.0,1.0,28.0,28.0,("sysmon-ring",label)),tip.clone());
+        }
+    }
+
     pub(crate) fn draw_quota_bar(&mut self,c:&Card,cx:f32,layout:&crate::bar_layout::Layout){
         let indices=self.quota_bar_indices();let mut chosen=None;
         for (position,i)in indices.iter().enumerate(){
@@ -432,6 +478,11 @@ impl App {
         if !self.quota.connect_open&&!self.quota.note.is_empty(){ui.add_space(8.0);ui.label(egui::RichText::new(&self.quota.note).size(12.0).color(ui.visuals().weak_text_color()));}
         self.quota_connect_window(ui.ctx());
         if before!=self.quota.config{self.quota.config.save();}
+        // AI 状态灯与用量成本（放在账号列表之后，避免挤占账号行的可见区域）。
+        ui.add_space(10.0);
+        self.agent_status_settings(ui);
+        ui.add_space(10.0);
+        self.ai_usage_settings(ui);
     }
     fn quota_connect_window(&mut self,ctx:&egui::Context){
         if !self.quota.connect_open{return;}let mut open=true;
@@ -502,6 +553,57 @@ impl App {
         });self.quota.connect_open=open;
         if !open{self.quota.deepseek_key.clear();self.quota.gemini_cookie.clear();}
     }
+    /// AI 状态灯：开关、钩子安装、各工具状态、自检。
+    fn agent_status_settings(&mut self, ui: &mut egui::Ui) {
+        use crate::agent_status::{self, AgentKind, Phase};
+        settings_label(ui, "AI 状态灯");
+        settings_card(ui, |ui| {
+            setting_row(ui, "启用状态灯", "收起时在岛角显示各 AI 工具运行状态", &mut self.settings.agent_status_enabled);
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                for (i, kind) in AgentKind::ALL.into_iter().enumerate() {
+                    let mut on = self.settings.agent_status_agents[i];
+                    if ui.checkbox(&mut on, kind.label()).changed() {
+                        self.settings.agent_status_agents[i] = on;
+                    }
+                    let phase = self.agent_status.phase_of(kind);
+                    let (dot, tip) = match phase {
+                        Phase::Running => (Color32::from_rgb(255, 77, 94), "运行中"),
+                        Phase::Failed | Phase::Stale => (Color32::from_rgb(255, 209, 102), "需关注"),
+                        _ => (Color32::from_rgb(53, 233, 133), "空闲/完成"),
+                    };
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 4.0, dot);
+                    let _ = tip;
+                }
+            });
+            settings_hint(ui, "通过生命周期钩子读取 Codex / Claude Code 状态；Qoder、WorkBuddy、Trae 暂无公开钩子，暂不监控。");
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("安装/修复钩子").clicked() {
+                    match agent_status::install() {
+                        Ok(r) => {
+                            let mut note = format!("已安装到 {}", r.scripts_dir);
+                            if !r.notes.is_empty() { note.push_str("；"); note.push_str(&r.notes.join("；")); }
+                            self.agent_install_note = note;
+                        }
+                        Err(e) => self.agent_install_note = e,
+                    }
+                }
+                if ui.button("自检：运行中").on_hover_text("模拟 Codex 进入运行中状态").clicked() {
+                    agent_status::simulate(AgentKind::Codex, Phase::Running);
+                }
+                if ui.button("自检：完成").clicked() {
+                    agent_status::simulate(AgentKind::Codex, Phase::Completed);
+                }
+            });
+            if !self.agent_install_note.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&self.agent_install_note).size(11.0).color(Color32::from_gray(120)));
+            }
+        });
+    }
+
     fn quota_file_form(&mut self,ui:&mut egui::Ui){
         let local=self.quota.provider==Provider::Claude;
         ui.label(if local{"本地用量 JSON 文件"}else{"登录 JSON 文件"});ui.horizontal(|ui|{ui.add_sized([(ui.available_width()-65.0).max(100.0),27.0],egui::TextEdit::singleline(&mut self.quota.source).vertical_align(egui::Align::Center).hint_text(if local{"选择 Claude 本地用量记录"}else{"选择该账号的登录文件"}));if ui.button("选择…").clicked(){self.pending.push(Cmd::QuotaChooseFile);}});

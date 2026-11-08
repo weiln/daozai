@@ -76,6 +76,9 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    agent_svc: Option<daozai::agent_status::Service>,
+    ai_usage_svc: Option<daozai::ai_usage::Service>,
+    sysmon_svc: Option<daozai::sysmon::Service>,
 }
 
 impl Shell {
@@ -167,6 +170,9 @@ impl Shell {
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            agent_svc: None,
+            ai_usage_svc: None,
+            sysmon_svc: None,
         }
     }
 
@@ -471,6 +477,36 @@ impl eframe::App for Shell {
             }
             while let Some(ev)=self.quota.try_recv(self.app.quota_config()){self.app.quota_event(ev);}
         }
+        // AI 状态灯：按需启动采集线程并轮询快照。
+        if self.app.settings.agent_status_enabled {
+            if self.agent_svc.is_none() {
+                let ctx=ctx.clone();
+                self.agent_svc=Some(daozai::agent_status::Service::start(move||ctx.request_repaint()));
+            }
+            if let Some(svc)=&self.agent_svc {
+                while let Some(snap)=svc.try_recv(){self.app.set_agent_status(snap);}
+            }
+        }
+        // AI 用量与成本：按需启动采集线程并轮询快照。
+        if self.app.settings.ai_usage_enabled {
+            if self.ai_usage_svc.is_none() {
+                let ctx=ctx.clone();
+                self.ai_usage_svc=Some(daozai::ai_usage::Service::start(move||ctx.request_repaint()));
+            }
+            if let Some(svc)=&self.ai_usage_svc {
+                while let Some(snap)=svc.try_recv(){self.app.set_ai_usage(snap);}
+            }
+        }
+        // 系统监控：按需启动采样线程并轮询快照。
+        if self.app.settings.sysmon_enabled {
+            if self.sysmon_svc.is_none() {
+                let ctx=ctx.clone();
+                self.sysmon_svc=Some(daozai::sysmon::Service::start(move||ctx.request_repaint()));
+            }
+            if let Some(svc)=&self.sysmon_svc {
+                while let Some(snap)=svc.try_recv(){self.app.set_sysmon(snap);}
+            }
+        }
         let mut out = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
@@ -500,6 +536,12 @@ impl eframe::App for Shell {
                     }
                 }
                 Cmd::ViewMessenger(unread)=>{
+                    // 钉钉来自通知中心，不做窗口级切换：直接清除该来源未读。
+                    if !unread.source.can_focus_window() {
+                        self.app.viewed_messenger(unread.source);
+                        self.app.say(format!("已清除{}未读", unread.source.name()));
+                        continue;
+                    }
                     #[cfg(windows)] match daozai::wechat::open_unread(unread){
                         Ok(())=>{
                             match daozai::wechat::foreground_client(&[unread.source]){
@@ -603,6 +645,7 @@ impl eframe::App for Shell {
         #[cfg(windows)] let autostart = self.autostart;
         #[cfg(not(windows))] let autostart = false;
         self.app.settings_ui(ctx, autostart);
+        self.app.translate_ui(ctx);
         self.app.mail_reader_ui(ctx);
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;

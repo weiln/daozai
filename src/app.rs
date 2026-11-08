@@ -20,10 +20,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 // ---------- 几何（逻辑点；原版 125% 截图 ÷ 1.25） ----------
-pub const PW: f32 = 419.0; // 展开面板宽
-pub const PH: f32 = 140.0; // 展开面板高
+/// 展开面板整体放大倍率（对标 BrimDeck 的大画布）。页内绘制仍按 419×140 的
+/// 基准逻辑坐标书写，由 `Card.s = LAYOUT_SCALE` 统一放大填充面板，因此各页面无需
+/// 改写坐标即可“整体变大”。收起态药丸尺寸不随之放大（见 BAR_W/BAR_H）。
+pub const LAYOUT_SCALE: f32 = 1.4;
+/// 展开面板的基准逻辑尺寸（页面坐标按此书写）。
+pub const PANEL_W_BASE: f32 = 419.0;
+pub const PANEL_H_BASE: f32 = 140.0;
+pub const PW: f32 = PANEL_W_BASE * LAYOUT_SCALE; // 展开面板宽（屏幕逻辑点）
+pub const PH: f32 = PANEL_H_BASE * LAYOUT_SCALE; // 展开面板高（屏幕逻辑点）
 pub(crate) const CALENDAR_PAGE: usize = 7;
-pub(crate) const CALENDAR_H: f32 = 216.0;
+pub(crate) const CALENDAR_H: f32 = 216.0 * LAYOUT_SCALE;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
@@ -35,9 +42,9 @@ pub const BAR_H_MIN: f32 = 4.5;
 pub const FLARE: f32 = 17.6; // 顶部外翻肩宽
 pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
 pub const RAD: f32 = 33.0; // 底部圆角
-pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
+pub const WIN_W: f32 = 640.0 * LAYOUT_SCALE; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
-pub const WIN_H: f32 = 270.0;
+pub const WIN_H: f32 = 270.0 * LAYOUT_SCALE;
 /// 胶囊皮肤与屏幕顶边的间隙。
 pub const PILL_GAP: f32 = 6.0;
 
@@ -49,7 +56,10 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const PAGE_NAMES: [&str; 10] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "AI 用量", "系统监控"];
+/// AI 用量页与系统监控页（新增的独立页）。
+pub(crate) const AI_USAGE_PAGE: usize = 8;
+pub(crate) const SYSMON_PAGE: usize = 9;
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -125,9 +135,11 @@ impl Env {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Messenger { Wechat, Qq }
+pub enum Messenger { Wechat, Qq, DingTalk }
 impl Messenger {
-    pub fn name(self)->&'static str {match self {Self::Wechat=>"微信",Self::Qq=>"QQ"}}
+    pub fn name(self)->&'static str {match self {Self::Wechat=>"微信",Self::Qq=>"QQ",Self::DingTalk=>"钉钉"}}
+    /// 微信 / QQ 可通过窗口切换定位到会话；钉钉来自通知中心，只做提醒。
+    pub fn can_focus_window(self)->bool {!matches!(self, Self::DingTalk)}
 }
 
 /// 一条未读：来源、账号所在进程（QQ 通知分不出账号，记为 0）和发出提醒的窗口（没有时为 0）。
@@ -606,7 +618,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 10],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -676,6 +688,9 @@ pub struct App {
     fluid_title:String,
     screen:Option<Rect>,
     pub(crate) settings_focus_requested:bool,
+    /// 上一帧设置视口是否存活：设置视口是立即模式的，每帧重建，
+    /// 记录它才能保证“重新打开时一定重新请求显示”。
+    pub(crate) settings_viewport_open:Option<egui::ViewportId>,
     pub(crate) settings_tab:usize,
     pub(crate) settings_category:usize,
     pub wechat_status:String,
@@ -727,6 +742,17 @@ pub struct App {
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
+    pub(crate) translate: crate::translate_ui::State,
+    /// AI Agent 生命周期状态快照（后台服务线程推送）。
+    pub(crate) agent_status: crate::agent_status::Snapshot,
+    /// 最近一次钩子安装的结果提示（设置页展示）。
+    pub(crate) agent_install_note: String,
+    /// AI 用量与成本分析面板状态。
+    pub(crate) ai_usage: crate::ai_usage_ui::State,
+    /// 系统监控快照（后台服务线程推送）。
+    pub(crate) sysmon: crate::sysmon::Snapshot,
+    /// 通知摘要计数（按 NotifyApp::ALL 顺序；静音/免打扰时累加）。
+    pub(crate) notify_digest_counts: [usize; 6],
     pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
@@ -808,7 +834,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, wechat_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_viewport_open:None, settings_tab:0, settings_category:0, wechat_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
@@ -830,6 +856,12 @@ impl App {
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
+            translate: crate::translate_ui::State::load(),
+            agent_status: crate::agent_status::Snapshot::default(),
+            agent_install_note: String::new(),
+            ai_usage: crate::ai_usage_ui::State::load(),
+            sysmon: crate::sysmon::Snapshot::default(),
+            notify_digest_counts: [0; 6],
             updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
@@ -1276,7 +1308,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8,11,0][page];
             self.open_settings();
             return;
         }
@@ -1299,6 +1331,14 @@ impl App {
     }
     pub fn page(&self) -> usize {
         self.page
+    }
+    /// 供外壳线程推送 AI Agent 状态快照。
+    pub fn set_agent_status(&mut self, snapshot: crate::agent_status::Snapshot) {
+        self.agent_status = snapshot;
+    }
+    /// 供外壳线程推送系统监控快照。
+    pub fn set_sysmon(&mut self, snapshot: crate::sysmon::Snapshot) {
+        self.sysmon = snapshot;
     }
 
     pub(crate) fn set_page_visible(&mut self,page:usize,visible:bool) {
@@ -1483,8 +1523,11 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==6{176.0*LAYOUT_SCALE}else if self.page==5&&self.mail.open_uid.is_some(){236.0*LAYOUT_SCALE}else{PH}
     }
+
+    /// 展开面板在当前页的**基准逻辑高度**（页面坐标按此书写，实际绘制再 ×LAYOUT_SCALE）。
+    pub(crate) fn content_height(&self)->f32 { self.expanded_height() / LAYOUT_SCALE }
 
     // ---------------------------------------------------------------
     // 每帧入口
@@ -1540,7 +1583,12 @@ impl App {
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
+        // 系统监控环（CPU / 内存）排在额度环之前；有任一读数才显示。
+        let sysmon_rings=self.settings.sysmon_enabled
+            && self.settings.sysmon_hud
+            && !self.settings.minimal
+            && (self.sysmon.cpu.value().is_some()||self.sysmon.mem_ratio.value().is_some()||self.sysmon.gpu.value().is_some());
+        let mut layout=Layout::with_sysmon(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),sysmon_rings,self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
         layout.reorder(&self.settings.resident_order);
         for (position,extra) in self.quota_balance_layout(&ctx){layout.balance_tail(position,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
@@ -1611,10 +1659,12 @@ impl App {
                 self.wheel_delta=0.0;
                 self.navigate_page(right);
             } else if scroll!=0.0 {
-                let cursor=env.cursor.unwrap()-self.content_origin(win).to_vec2();
-                let mail_reading=self.page==5 && self.mail.open_uid.is_some();
+                let cr=env.cursor.unwrap()-self.content_origin(win).to_vec2();
+                let cursor=Pos2::new(cr.x/LAYOUT_SCALE, cr.y/LAYOUT_SCALE);
+                let mail_body=self.page==5 && self.mail.open_uid.is_some()
+                    && Rect::from_min_max(Pos2::new(46.0,104.0),Pos2::new(374.0,194.0)).contains(cursor);
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                if mail_reading || mail_list {self.wheel_delta=0.0;}
+                if mail_body || mail_list {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
@@ -1708,6 +1758,7 @@ impl App {
             self.fluid.advance(env.t,dt);
         }
         self.paint_body(&painter, body, flare, flare_h, radius, feather);
+        if let Some(r)=notice_shape {self.paint_body(&painter,r,5.0,8.0,12.5,feather);}
         let content_from=crate::skin_paint::shape_count(&ctx,layer);
 
         // 内容只随形体「揭开」：不缩放，按面板裁剪，到 55% 才开始淡入
@@ -1716,7 +1767,7 @@ impl App {
         let origin = self.content_origin(win);
         let clip = panel.intersect(win);
         let base = Card::new(ui, origin, clip);
-        self.cursor_local = env.cursor.map(|p| base.to_local(p));
+        self.cursor_local = env.cursor.map(|p| Pos2::new((p.x - origin.x) / LAYOUT_SCALE, (p.y - origin.y) / LAYOUT_SCALE));
 
         let banner=!self.compact_notices()&&self.notice.is_some()&&!self.open;
         let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()||a.source!=crate::extras::AlertSource::Internal);
@@ -1788,7 +1839,10 @@ impl App {
             self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,self.skin_palette());
         }
         if reveal > 0.004 && !banner && !restoring_lyrics {
-            let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
+            // 展开面板内容：页内坐标按 419×140 基准书写，这里统一放大到 LAYOUT_SCALE，
+            // 填充放大后的面板（PW×PH = 基准×LAYOUT_SCALE）。收起态顶栏（base）仍为 1:1。
+            let mut c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
+            c.s = LAYOUT_SCALE;
             let c = if reveal < 0.6 { c.ghost() } else { c };
             if self.calendar.draft.is_some(){self.draw_calendar_editor(&c);}else if self.task_dialog.is_some(){self.draw_task_editor(&c);}else{self.panel_body(&c, env, &mut cmds);}
             if !self.toast_below {self.toast_layer(&c,106.0);}
@@ -1952,7 +2006,7 @@ impl App {
     fn unread_slot(&self,height:f32)->f32 {
         if self.pending_messengers.len()>=3 {(height-4.0)/3.0} else {UNREAD_SLOT}
     }
-    /// 收起时叠放的来源图标（最多两个）。
+    /// 收起时叠放的来源图标（最多三个：微信 / QQ / 钉钉）。
     fn unread_sources(&self)->Vec<Messenger>{
         let mut sources=Vec::new();
         for u in &self.pending_messengers {if !sources.contains(&u.source){sources.push(u.source);}}
@@ -1960,7 +2014,7 @@ impl App {
     }
     /// 收起时叠放区沿胶囊方向的长度。
     fn unread_stack_len(&self,horizontal:bool)->f32 {
-        let icons=self.unread_sources().len().min(2) as f32;
+        let icons=self.unread_sources().len().min(3) as f32;
         32.0+unread_step(horizontal)*(icons-1.0)
     }
 
@@ -2041,7 +2095,8 @@ impl App {
     fn draw_unread_stack(&mut self,c:&Card,horizontal:bool,cmds:&mut Vec<Cmd>){
         let sources=self.unread_sources();
         let count=self.pending_messengers.len();
-        let icons=sources.len().min(2);
+        // 最多并排显示三个来源（微信 / QQ / 钉钉）。
+        let icons=sources.len().min(3);
         let step=unread_step(horizontal);
         let at=|k:usize|if horizontal {(16.0+step*k as f32,14.0)}else{(16.0,14.0+step*k as f32)};
         for k in 0..icons {
@@ -2335,11 +2390,86 @@ impl App {
         }
         if compact_alpha>0.004 {
             let c=base.faded(compact_alpha);let c=if compact_alpha<0.8{c.ghost()}else{c};
+            // 系统监控环在最前（额度环之前）。
+            self.draw_sysmon_bar(&c,local_cx,&layout);
             self.draw_quota_bar(&c,local_cx,&layout);
         }
         if self.pomo.running && compact_alpha>0.004 {
             crate::focus_bar::draw(&base.faded(compact_alpha),local_cx+layout.x[bar::FOCUS].unwrap(),15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
         }
+    }
+
+    /// AI 状态灯：聚合圆点。红=运行中（呼吸），橙=失败/卡住，绿=完成/空闲。
+    fn paint_agent_dot(&self, painter: &egui::Painter, body: Rect, p: f32) {
+        if !self.settings.agent_status_enabled || self.settings.minimal {
+            return;
+        }
+        // 各工具开关过滤后的聚合状态。
+        let mut worst: Option<(u8, crate::agent_status::Phase)> = None;
+        for (i, kind) in crate::agent_status::AgentKind::ALL.into_iter().enumerate() {
+            if !self.settings.agent_status_agents[i] {
+                continue;
+            }
+            let phase = self.agent_status.phase_of(kind);
+            let sev = phase.severity();
+            if worst.map_or(true, |(s, _)| sev > s) {
+                worst = Some((sev, phase));
+            }
+        }
+        let Some((_, phase)) = worst else { return };
+        use crate::agent_status::Phase;
+        let color = match phase {
+            Phase::Running => Color32::from_rgb(255, 77, 94),
+            Phase::Failed | Phase::Stale => Color32::from_rgb(255, 209, 102),
+            _ => Color32::from_rgb(53, 233, 133),
+        };
+        // 位置：收起态右上角；展开时贴在面板右上角内侧。
+        let (cx, cy) = if p < 0.5 {
+            (body.right() - 7.0, body.top() + 7.0)
+        } else {
+            (body.right() - 14.0, body.top() + 14.0)
+        };
+        // 运行中：呼吸光晕 + 动态缩放。
+        let (glow, radius) = if phase == Phase::Running {
+            let t = (self.t as f32 * 3.0).sin() * 0.5 + 0.5;
+            (0.35 + 0.35 * t, 3.4 + 0.9 * t)
+        } else {
+            (0.0, 3.2)
+        };
+        if glow > 0.0 {
+            painter.circle_filled(Pos2::new(cx, cy), radius + 3.5, paint::alpha(color, glow * 0.5));
+        }
+        painter.circle_filled(Pos2::new(cx, cy), radius, color);
+        if phase == Phase::Running {
+            painter.circle_stroke(Pos2::new(cx, cy), radius + 1.6, egui::Stroke::new(1.0, paint::alpha(color, 0.5)));
+        }
+    }
+
+    /// AI 用量摘要：仅收起态、且开启时，在岛体左下角显示一小段文字。
+    /// 系统监控设置（在「常规」页调用）：开关、收起态 HUD、各读数快照。
+    pub(crate) fn sysmon_settings(&mut self, ui: &mut egui::Ui) {
+        use crate::extras::{setting_row, settings_card, settings_hint, settings_label};
+        settings_label(ui, "系统监控");
+        settings_card(ui, |ui| {
+            // 与其它设置保持一致：setting_row 开关行。
+            setting_row(ui, "监控 CPU / 内存 / GPU", "收起时在岛上显示圆形读数", &mut self.settings.sysmon_enabled);
+            ui.separator();
+            setting_row(ui, "显示监控圆环", "在 AI 额度环之前显示 CPU / 内存环", &mut self.settings.sysmon_hud);
+            ui.separator();
+            // 读数：不可用显示 —。
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(format!("CPU {}", self.sysmon.cpu.pct_text())).size(12.0));
+                ui.add_space(8.0);
+                let mem = if self.sysmon.mem_total > 0 {
+                    format!("内存 {} ({}/{})", self.sysmon.mem_ratio.pct_text(), crate::sysmon::format_bytes(self.sysmon.mem_used), crate::sysmon::format_bytes(self.sysmon.mem_total))
+                } else {
+                    format!("内存 {}", self.sysmon.mem_ratio.pct_text())
+                };
+                ui.label(egui::RichText::new(mem).size(12.0));
+            });
+            ui.label(egui::RichText::new(format!("GPU {} · CPU 温度 {} · 功耗 {}", self.sysmon.gpu.pct_text(), self.sysmon.cpu_temp.pct_text(), self.sysmon.power.pct_text())).size(11.5).color(egui::Color32::from_gray(120)));
+            settings_hint(ui, "GPU 通过系统性能计数器读取；温度与功耗需要硬件驱动接口，暂不采集（显示 —，不影响其它读数）。");
+        });
     }
 
     /// 常驻内容：顶部停靠走共享元素过渡（药丸里的电池、时钟飞到顶栏）；
@@ -2387,7 +2517,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,11,0][self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -2451,9 +2581,9 @@ impl App {
         if r.clicked() { self.navigate_page(true); }
         // 页码豆：宽度由弹簧驱动，整行实时居中；当前页是白色长条
         let gap = 4.0;
-        let dot_y=self.expanded_height()-7.2;
+        let dot_y=self.content_height()-7.2;
         let total: f32 = pages.iter().map(|page| self.dots[*page].pos).sum::<f32>() + gap * (pages.len()-1) as f32;
-        let mut x = PW / 2.0 - total / 2.0;
+        let mut x = PANEL_W_BASE / 2.0 - total / 2.0;
         let mut clicked = None;
         for i in pages {
             let w = self.dots[i].pos.max(3.0);
@@ -2487,6 +2617,8 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            AI_USAGE_PAGE => self.page_ai_usage(c),
+            SYSMON_PAGE => self.page_sysmon(c),
             _ => self.page_settings(c),
         }
     }
@@ -2504,9 +2636,11 @@ impl App {
         let w = c.text_w(&msg, size::BODY, W::Regular) + 26.0;
         let tc = c.faded(a);
         let y = base_y + rise;
-        tc.fill(PW / 2.0 - w / 2.0, y, w, 22.0, 11.0, Color32::from_rgb(44, 44, 48));
-        tc.text(PW / 2.0, y + 15.0, &msg, size::BODY, W::Regular, theme::WHITE, H::Center);
-        Some(tc.rect(PW/2.0-w/2.0,y,w,22.0))
+        // 面板在当前卡片坐标系下的宽度（内容卡 s=LAYOUT_SCALE，浮动提示卡 s=1）。
+        let panel_w = PW / c.s;
+        tc.fill(panel_w / 2.0 - w / 2.0, y, w, 22.0, 11.0, Color32::from_rgb(44, 44, 48));
+        tc.text(panel_w / 2.0, y + 15.0, &msg, size::BODY, W::Regular, theme::WHITE, H::Center);
+        Some(tc.rect(panel_w/2.0-w/2.0,y,w,22.0))
     }
 
     // ---------------------------------------------------------------
@@ -2768,15 +2902,16 @@ impl App {
 
     /// 待办输入框：真正的 egui 文本框，放在待办卡片顶部那一行。
     fn input_field(&mut self, ui: &mut egui::Ui, origin: Pos2, cmds: &mut Vec<Cmd>) {
-        let rect = Rect::from_min_size(origin + Vec2::new(222.0, 37.0), Vec2::new(142.0, 18.0));
+        let s = LAYOUT_SCALE;
+        let rect = Rect::from_min_size(origin + Vec2::new(222.0, 37.0) * s, Vec2::new(142.0, 18.0) * s);
         let mut buf = std::mem::take(&mut self.buf);
         let te = egui::TextEdit::singleline(&mut buf)
             .id(egui::Id::new("todo-input"))
             .frame(false)
             .margin(egui::Margin::ZERO)
             .text_color(theme::WHITE)
-            .font(theme::font(size::BODY, W::Regular))
-            .hint_text(egui::RichText::new("要做点什么？回车保存").color(theme::DIM).font(theme::font(size::BODY, W::Regular)))
+            .font(theme::font(size::BODY * s, W::Regular))
+            .hint_text(egui::RichText::new("要做点什么？回车保存").color(theme::DIM).font(theme::font(size::BODY * s, W::Regular)))
             .desired_width(rect.width());
         let resp = ui.put(rect, te);
         let first_focus=!self.todo_input_focused;

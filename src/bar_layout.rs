@@ -7,15 +7,32 @@ pub(crate) const QUOTA: usize = 2;
 pub(crate) fn quota_slot(position:usize)->usize {
     if position<3 {QUOTA+position} else {WIDTHS.len()+position-3}
 }
-pub(crate) const MUSIC: usize = 6;
-pub(crate) const FOCUS: usize = 7;
-pub(crate) const BELL: usize = 8;
-pub(crate) const PET: usize = 9;
-const WIDTHS: [f32; 10] = [44.0,20.0,27.0,27.0,27.0,22.0,14.0,crate::focus_bar::WIDTH,20.0,32.0];
+/// 系统监控环（CPU / 内存），固定排在额度环之前。
+pub(crate) const SYSMON: usize = 6;
+pub(crate) fn sysmon_slot(position:usize)->usize { SYSMON + position }
+pub(crate) const SYSMON_COUNT: usize = 3;
+pub(crate) const MUSIC: usize = 9;
+pub(crate) const FOCUS: usize = 10;
+pub(crate) const BELL: usize = 11;
+pub(crate) const PET: usize = 12;
+const WIDTHS: [f32; 13] = [44.0,20.0,27.0,27.0,27.0,22.0,27.0,27.0,27.0,14.0,crate::focus_bar::WIDTH,20.0,32.0];
 
-pub(crate) const DEFAULT_ORDER: [usize;6]=[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS];
+/// 可拖动的常驻组：电量、吉祥物、时间、系统监控、AI 额度、音乐、专注。
+pub(crate) const ORDER_SLOTS: [usize;7]=[BATTERY,PET,CLOCK,SYSMON,QUOTA,MUSIC,FOCUS];
+pub(crate) const DEFAULT_ORDER: [usize;7]=[BATTERY,PET,CLOCK,SYSMON,QUOTA,MUSIC,FOCUS];
 pub(crate) fn valid_order(order:&[usize])->bool {
-    order.len()==6 && DEFAULT_ORDER.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
+    order.len()==ORDER_SLOTS.len() && ORDER_SLOTS.iter().all(|slot|order.iter().filter(|value|*value==slot).count()==1)
+}
+/// 兼容旧版 6 项顺序：补入系统监控（插在额度之前）。
+pub(crate) fn normalize_order(order:&[usize])->Option<Vec<usize>> {
+    if valid_order(order) { return Some(order.to_vec()); }
+    if order.len()==6 && order.iter().all(|s|ORDER_SLOTS.contains(s)) && order.iter().collect::<std::collections::HashSet<_>>().len()==6 {
+        let mut out=order.to_vec();
+        let at=out.iter().position(|s|*s==QUOTA).unwrap_or(out.len());
+        out.insert(at,SYSMON);
+        return Some(out);
+    }
+    None
 }
 
 pub(crate) fn animations_enabled()->bool {
@@ -41,34 +58,54 @@ pub(crate) struct Layout {
 
 impl Layout {
     pub fn new(battery:bool,quotas:usize,music:bool,focus:bool,bell:bool,pet:bool)->Self {
+        Self::with_sysmon(battery,quotas,false,music,focus,bell,pet)
+    }
+
+    /// `sysmon` 为真时显示 CPU / 内存 / GPU 三个环，作为独立可拖动组排在额度环之前。
+    pub fn with_sysmon(battery:bool,quotas:usize,sysmon:bool,music:bool,focus:bool,bell:bool,pet:bool)->Self {
         fn place(cursor:&mut f32,width:f32)->f32 {let x=*cursor+width/2.0;*cursor+=width+12.0;x}
         let mut widths=WIDTHS.to_vec(); widths.resize(WIDTHS.len()+quotas.saturating_sub(3),27.0);
         let mut x=vec![None;widths.len()];let mut cursor=16.0;
         let count=quotas;
-        let order=if battery {[BATTERY,CLOCK,QUOTA]}else{[QUOTA,CLOCK,BATTERY]};
-        for slot in order {
+        let sysmon_count=if sysmon {SYSMON_COUNT}else{0};
+        let ring_width=|n:usize| n as f32*27.0+n.saturating_sub(1) as f32*7.0;
+        // 默认顺序：电量、吉祥物、时间、系统监控、额度、音乐、专注。无电池时额度提到最前。
+        // 无电池时额度（含监控环）提前补位到时钟左侧。
+        let order: &[usize] = if battery { &DEFAULT_ORDER } else { &[SYSMON,QUOTA,CLOCK,PET,MUSIC,FOCUS,BATTERY] };
+        for &slot in order {
             match slot {
                 BATTERY if battery=>x[slot]=Some(place(&mut cursor,WIDTHS[slot])),
-                CLOCK=>{
-                    if pet {x[PET]=Some(place(&mut cursor,WIDTHS[PET]));}
-                    x[slot]=Some(place(&mut cursor,WIDTHS[slot]));
+                PET if pet=>x[slot]=Some(place(&mut cursor,WIDTHS[PET])),
+                CLOCK=>x[slot]=Some(place(&mut cursor,WIDTHS[slot])),
+                SYSMON if sysmon_count>0=>{
+                    let total=ring_width(sysmon_count);
+                    let left=place(&mut cursor,total)-total/2.0;
+                    let mut cx=left+13.5;
+                    for i in 0..sysmon_count {x[sysmon_slot(i)]=Some(cx);cx+=34.0;}
                 },
                 QUOTA if count>0=>{
-                    let width=count as f32*27.0+(count-1) as f32*7.0;
-                    let left=place(&mut cursor,width)-width/2.0;
-                    for i in 0..count {x[quota_slot(i)]=Some(left+13.5+i as f32*34.0);}
+                    let total=ring_width(count);
+                    let left=place(&mut cursor,total)-total/2.0;
+                    let mut cx=left+13.5;
+                    for i in 0..count {x[quota_slot(i)]=Some(cx);cx+=34.0;}
                 },
+                MUSIC if music&&!bell=>x[slot]=Some(place(&mut cursor,WIDTHS[slot])),
+                FOCUS if focus=>x[slot]=Some(place(&mut cursor,WIDTHS[slot])),
                 _=>{},
             }
         }
-        for (slot,on) in [(MUSIC,music&&!bell),(FOCUS,focus),(BELL,bell)] {
-            if on {x[slot]=Some(place(&mut cursor,WIDTHS[slot]));}
-        }
+        if bell {x[BELL]=Some(place(&mut cursor,WIDTHS[BELL]));}
         let width=cursor-12.0+16.0;
         for value in x.iter_mut().flatten() {*value-=width/2.0;}
         Self {width:width.max(96.0),x,widths,quotas}
     }
     pub fn quota_slots(&self)->impl Iterator<Item=usize> { (0..self.quotas).map(quota_slot) }
+    /// 全部圆环槽位（系统监控环 + 额度环），用于时钟淡出与重排。
+    pub fn ring_slots(&self)->Vec<usize> {
+        let mut out:Vec<usize>=(0..SYSMON_COUNT).map(sysmon_slot).filter(|i|self.x[*i].is_some()).collect();
+        out.extend(self.quota_slots().filter(|i|self.x[*i].is_some()));
+        out
+    }
     pub fn balance_tail(&mut self,position:usize,extra:f32){
         let slot=quota_slot(position);
         let Some(center)=self.x[slot] else{return;};
@@ -86,7 +123,12 @@ impl Layout {
         if !valid_order(order){return;}
         let original=self.x.clone();let mut cursor=-self.width/2.0+16.0;
         for slot in order.iter().copied().chain(std::iter::once(BELL)) {
-            let slots:Vec<usize>=if slot==QUOTA{self.quota_slots().collect()}else{vec![slot]};
+            // 系统监控环与额度环各自成组，可独立拖动。
+            let slots:Vec<usize>=match slot {
+                SYSMON=>(0..SYSMON_COUNT).map(sysmon_slot).filter(|i|original[*i].is_some()).collect(),
+                QUOTA=>self.quota_slots().collect(),
+                _=>vec![slot],
+            };
             let left=slots.iter().filter_map(|&i|original[i].map(|x|x-self.widths[i]/2.0)).fold(f32::INFINITY,f32::min);
             let right=slots.iter().filter_map(|&i|original[i].map(|x|x+self.widths[i]/2.0)).fold(f32::NEG_INFINITY,f32::max);
             if !left.is_finite(){continue;}
@@ -97,7 +139,7 @@ impl Layout {
     /// 圆环换边经过时钟时，暂时淡出时钟，避免移动中相互遮挡。
     pub fn clearance(&self,slot:usize)->f32 {
         let Some(x)=self.x[slot] else{return 0.0;};
-        let distance=self.quota_slots().filter_map(|i|self.x[i].map(|other|(other-x).abs()-(self.widths[i]-27.0)/2.0)).fold(f32::INFINITY,f32::min);
+        let distance=self.ring_slots().into_iter().filter_map(|i|self.x[i].map(|other|(other-x).abs()-(self.widths[i]-27.0)/2.0)).fold(f32::INFINITY,f32::min);
         let quota=if slot==CLOCK {smoothstep(34.0,44.0,distance)}else{smoothstep(22.0,34.0,distance)};
         quota*self.pet_clearance(slot)
     }
@@ -115,7 +157,7 @@ pub(crate) struct Motion {
     initialized: bool,
 }
 impl Default for Motion {
-    fn default()->Self {Self {target:Layout::new(false,0,false,false,false,false),positions:vec![Spring::new(0.0,360.0,0.76);10],initialized:false}}
+    fn default()->Self {Self {target:Layout::new(false,0,false,false,false,false),positions:vec![Spring::new(0.0,360.0,0.76);13],initialized:false}}
 }
 impl Motion {
     pub fn step(&mut self,target:Layout,dt:f32,animate:bool) {
@@ -141,8 +183,8 @@ impl Motion {
 mod tests {
     use super::*;
     #[test] fn deepseek_balance_follows_more_and_never_overlaps(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {for quotas in 1..=6 {for battery in [false,true]{
-            let mut layout=Layout::new(battery,quotas,true,true,false,true);layout.reorder(&order);layout.balance_tail(quotas-1,76.0);layout.widen_clock(40.0);
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,SYSMON,QUOTA,CLOCK,PET,BATTERY]] {for quotas in 1..=6 {for battery in [false,true]{
+            let mut layout=Layout::with_sysmon(battery,quotas,true,true,true,false,true);layout.reorder(&order);layout.balance_tail(quotas-1,76.0);layout.widen_clock(40.0);
             let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|{let width=layout.widths[i]+if i==CLOCK{40.0}else{0.0};(x-width/2.0,x+width/2.0)})).collect();boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
             assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9));assert!(boxes.last().unwrap().1<=layout.width/2.0-15.9);
             assert!(layout.width<crate::app::WIN_W);
@@ -150,9 +192,9 @@ mod tests {
     }
     #[test]
     fn clock_12h_keeps_components_separate_in_custom_orders(){
-        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,SYSMON,QUOTA,CLOCK,PET,BATTERY]] {
             for quotas in 0..=5 {
-                let mut layout=Layout::new(true,quotas,true,true,false,true);
+                let mut layout=Layout::with_sysmon(true,quotas,true,true,true,false,true);
                 layout.reorder(&order);layout.widen_clock(40.0);
                 let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|{
                     let width=layout.widths[i]+if i==CLOCK {40.0}else{0.0};
@@ -169,9 +211,19 @@ mod tests {
     fn custom_order_preserves_groups_and_hidden_positions(){
         assert!(!valid_order(&[0,0,2,6,7,9]));
         assert!(!valid_order(&[0,1,2]));
-        let order=[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY];
+        // 旧版 6 项顺序应被规整为 7 项，且监控插在额度之前。
+        let migrated=normalize_order(&[BATTERY,PET,CLOCK,QUOTA,MUSIC,FOCUS]).expect("旧顺序应可迁移");
+        assert_eq!(migrated.len(),7);
+        let at=migrated.iter().position(|s|*s==SYSMON).unwrap();
+        let quota=migrated.iter().position(|s|*s==QUOTA).unwrap();
+        assert_eq!(at+1,quota,"系统监控应排在额度之前");
+        assert!(valid_order(&migrated));
+        // 已是 7 项的保持原样；非法值返回 None。
+        assert_eq!(normalize_order(&DEFAULT_ORDER).as_deref(),Some(&DEFAULT_ORDER[..]));
+        assert!(normalize_order(&[0,0,2]).is_none());
+        let order=[FOCUS,MUSIC,SYSMON,QUOTA,CLOCK,PET,BATTERY];
         for battery in [false,true]{for count in 0..=5 {
-            let mut layout=Layout::new(battery,count,true,true,false,true);
+            let mut layout=Layout::with_sysmon(battery,count,true,true,true,false,true);
             let width=layout.width;layout.reorder(&order);
             assert_eq!(layout.width,width);
             let positions:Vec<_>=order.iter().filter_map(|i|layout.x[*i]).collect();
