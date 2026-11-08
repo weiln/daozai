@@ -35,18 +35,24 @@ impl Burst {
     fn left(now: Instant) -> Self { Self{last:Some(now),quiet_until:Some(now+LEAVE_GRACE)} }
 }
 
+/// 收到一次外壳事件后的结论，由描述文案与是否重绘使用。
+#[derive(Debug,PartialEq,Eq)]
+pub enum Heard { Alert, Merged, Viewing, Ended, Ignored }
+
 /// 一个来源（微信 / 钉钉）的合并与待取提醒。纯逻辑，可脱离 Windows 单测。
 pub struct Source {
     pub source: crate::app::Messenger,
     /// 每个账号（进程）各自合并连续闪动。
     burst: Vec<(u32,Burst)>,
-    /// 尚未取走的提醒：账号进程与闪动的窗口。
+    /// 尚未取走的提醒：账号进程与闪动的窗口（isize::MAX 表示用户已点开、待清除）。
     pending: Vec<(u32,isize)>,
     /// 当前正在前台查看的账号进程。
     viewing: Vec<u32>,
+    /// 最近一次闪动开始、还没等到结束事件的账号进程。
+    active_flash: Option<u32>,
 }
 impl Source {
-    pub fn new(source:crate::app::Messenger)->Self { Self{source,burst:Vec::new(),pending:Vec::new(),viewing:Vec::new()} }
+    pub fn new(source:crate::app::Messenger)->Self { Self{source,burst:Vec::new(),pending:Vec::new(),viewing:Vec::new(),active_flash:None} }
     /// 取走新提醒：每项是（账号进程，闪动的窗口）。
     pub fn take(&mut self) -> Vec<(u32,isize)> { std::mem::take(&mut self.pending) }
     pub fn pending_len(&self)->usize { self.pending.len() }
@@ -78,6 +84,32 @@ impl Source {
     }
     /// 外壳报告的激活事件：只用来判断「谁进了前台 / 谁切走了」。
     pub fn foreground(&mut self,foreground:Option<u32>,now:Instant){self.leave_view(foreground,now);}
+    /// 还有没结束的闪动（只用来给「闪动结束」事件找归属）。
+    pub fn flashing(&self)->bool {self.active_flash.is_some()}
+    /// 处理一次外壳事件：闪动开始计提醒，闪动结束视为用户点开了消息。
+    ///
+    /// Windows 的 HSHELL_FLASH 与 HSHELL_FLASH|HSHELL_FLASHORIG 成对出现：开始时 lParam 是
+    /// 发出闪动的窗口，用户点开/超时结束时 lParam 为 0 或别的窗口。开始时只弹一次横幅；
+    /// 结束时把这条未读收掉——否则用户已经在浏览器点开了消息，岛上却一直挂着红点。
+    pub fn hear(&mut self,flash:bool,pid:u32,window:isize,foreground:Option<u32>,now:Instant)->Heard{
+        self.foreground(foreground,now);
+        if !flash {
+            if let Some(ended)=self.active_flash.take(){
+                self.burst.retain(|(p,_)|*p!=ended);
+                // 刚看过 / 切走的账号，其闪动结束是余波，不重复处理。
+                if self.viewing.contains(&ended) {return Heard::Viewing;}
+                match self.pending.iter_mut().find(|(p,_)|*p==ended){
+                    Some(entry)=>{entry.1=isize::MAX;Heard::Ended}
+                    None=>Heard::Ignored,
+                }
+            }else{return Heard::Ignored;}
+        }else{
+            if pid==0 {return Heard::Ignored;}
+            self.active_flash=Some(pid);
+            if foreground==Some(pid){self.enter_view(pid);return Heard::Viewing;}
+            if self.flash(pid,window,now){Heard::Alert}else{Heard::Merged}
+        }
+    }
 }
 
 fn normalized(path: &str) -> String {
@@ -224,6 +256,10 @@ impl State {
     fn source_of(&self,pid:u32)->Option<crate::app::Messenger>{
         self.paths.iter().find(|(_,p)|crate::wechat::pid_in(pid,p)).map(|(s,_)|*s)
     }
+    /// 闪动结束事件不带真的窗口：归给还在闪的那个来源。
+    fn source_with_active_flash(&self)->Option<crate::app::Messenger>{
+        self.sources.iter().find(|s|s.flashing()).map(|s|s.source)
+    }
 }
 
 unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM, _: usize, data: usize) -> LRESULT {
@@ -237,17 +273,21 @@ unsafe extern "system" fn subclass(hwnd: HWND, message: u32, wp: WPARAM, lp: LPA
             if message==state.message && matches!(wp.0, FLASH | 4 | 0x8004) {
                 let target=HWND(lp.0 as *mut _);
                 let pid=window_pid(target);
-                if let Some(source)=state.source_of(pid) {
+                // 闪动结束时 lParam 是 0 或任意窗口（不一定是钉钉的）：用「谁的闪动还没结束」来归属。
+                let source=state.source_of(pid).or_else(||state.source_with_active_flash());
+                if let Some(source)=source {
+                    crate::wechat::trace(format!("外壳事件 pid={pid} 码=0x{:X} 窗口={:#x}",wp.0,target.0 as usize));
                     let paths=state.paths_of(source);
                     let foreground=foreground_main_pid(source,&paths);
                     let now=Instant::now();
                     let ours=state.slot(source);
                     ours.foreground(foreground,now);
-                    if foreground==Some(pid){
-                        // 正在看这个账号：它的提醒作废，其它账号不受影响。
-                        ours.enter_view(pid);
-                    }else if wp.0==FLASH && ours.flash(pid,target.0 as isize,now){
-                        state.ctx.request_repaint();
+                    match ours.hear(wp.0==FLASH,pid,target.0 as isize,foreground,now) {
+                        Heard::Alert=>{crate::wechat::trace(format!("{} 闪动 pid={pid} 窗口={:#x} → 新提醒",source.name(),target.0 as usize));state.ctx.request_repaint();}
+                        Heard::Merged=>crate::wechat::trace(format!("{} 闪动 pid={pid} 窗口={:#x} → 合并 / 宽限期内",source.name(),target.0 as usize)),
+                        Heard::Viewing=>crate::wechat::trace(format!("{} 闪动来自正在查看的账号 {pid}，不提醒",source.name())),
+                        Heard::Ended=>{crate::wechat::trace(format!("{} 已停止闪动（用户点开了消息）",source.name()));state.ctx.request_repaint();}
+                        Heard::Ignored=>{},
                     }
                 }
             }
@@ -325,6 +365,24 @@ mod tests {
         assert!(s.flash(1,0x11,t0));
         assert!(s.flash(2,0x22,t0+Duration::from_millis(50)),"另一个账号的闪动不受影响");
         assert_eq!(s.take(),vec![(1,0x11),(2,0x22)]);
+    }
+    #[test]
+    fn flashing_alerts_once_then_clears_the_unread_when_it_ends(){
+        let mut s=Source::new(crate::app::Messenger::DingTalk);
+        let t0=Instant::now();
+        assert!(matches!(s.hear(true,42,0x11,None,t0),Heard::Alert),"闪动开始时弹一次横幅");
+        assert!(matches!(s.hear(true,42,0x12,None,t0+Duration::from_secs(1)),Heard::Merged),"连续闪动合并");
+        assert!(matches!(s.hear(false,0,0,None,t0+Duration::from_secs(2)),Heard::Ended),"闪动结束（用户点开了消息）");
+        assert!(!s.flashing(),"结束后不再闪");
+        // 结束事件不带窗口，按「还在闪的来源」归属，并通过 isize::MAX 标记待收掉未读。
+        assert_eq!(s.take(),vec![(42,isize::MAX)]);
+    }
+    #[test]
+    fn flash_end_without_a_start_is_ignored(){
+        let mut s=Source::new(crate::app::Messenger::DingTalk);
+        assert!(matches!(s.hear(false,0,0,None,Instant::now()),Heard::Ignored));
+        assert!(s.take().is_empty());
+        assert!(matches!(s.hear(true,0,0,None,Instant::now()),Heard::Ignored),"没有进程的闪动不处理");
     }
     #[test]
     fn dingtalk_paths_always_include_the_company_guard(){

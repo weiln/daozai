@@ -350,6 +350,11 @@ impl App {
         self.notification_bell_until=self.t+4.5;
         self.enqueue_alert(Alert{source:AlertSource::DingTalk,title:"钉钉".into(),body:"有新消息 · 请到钉钉查看".into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None},false);
     }
+    /// 浏览器 / 网页版里点开过钉钉：任务栏解除闪动（HSHELL_FLASH 结束）时到达，调用方传 isize::MAX。
+    /// 清掉未读，但不动界面；真正切到钉钉主窗口时才清。
+    pub fn mark_seen(&mut self,source:crate::app::Messenger){
+        self.viewed_messenger(source);
+    }
     /// 通知中心已经把这条钉钉消息提醒过了：不重复弹横幅，只累计未读。
     pub fn mark_dingtalk_unread_from_notification(&mut self){
         if !self.settings.dingtalk_notifications || !self.settings.notifications{return;}

@@ -415,8 +415,14 @@ impl eframe::App for Shell {
                 }
             }
             let previous_pending=self.app.pending_messengers.len();
-            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take(app::Messenger::Wechat)).unwrap_or_default(){daozai::wechat::trace(format!("岛上显示微信未读 账号 {pid}"));self.app.receive_wechat_reminder_from(pid,window);}
-            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take(app::Messenger::DingTalk)).unwrap_or_default(){daozai::wechat::trace(format!("岛上显示钉钉未读 账号 {pid} 窗口 {window:#x}"));self.app.receive_dingtalk_reminder_from(pid,window);}
+            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take(app::Messenger::Wechat)).unwrap_or_default(){
+                if window==isize::MAX {daozai::wechat::trace(format!("微信 账号 {pid} 已停止闪动，收掉未读"));self.app.mark_seen(app::Messenger::Wechat);}
+                else {daozai::wechat::trace(format!("岛上显示微信未读 账号 {pid}"));self.app.receive_wechat_reminder_from(pid,window);}
+            }
+            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take(app::Messenger::DingTalk)).unwrap_or_default(){
+                if window==isize::MAX {daozai::wechat::trace(format!("钉钉 账号 {pid} 已停止闪动，收掉未读"));self.app.mark_seen(app::Messenger::DingTalk);}
+                else {daozai::wechat::trace(format!("岛上显示钉钉未读 账号 {pid} 窗口 {window:#x}"));self.app.receive_dingtalk_reminder_from(pid,window);}
+            }
             if let Some(rx)=&self.incoming {
                 while let Ok(event)=rx.try_recv(){match event {daozai::system::Incoming::Revoked=>{self.app.settings.read_notifications=false;self.app.settings.save();},daozai::system::Incoming::Status(s)=>self.app.listener_status=s,daozai::system::Incoming::Message(a,id,b)=>self.app.receive_notification(a,id,b)}}
             }
