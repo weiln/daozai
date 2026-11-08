@@ -124,6 +124,8 @@ impl App {
         let clipboard_hint = self.translate.clipboard_hint.clone();
         let clip_latest = self.clipboard.lock().items.first().map(|c| crate::clipboard::preview(&c.text)).unwrap_or_default();
 
+        // 岛体固定深色；但子视口有自己的 Options（默认 ThemePreference::System），
+        // 会把浮动窗口按系统亮暗重绘。这里显式跟随岛体，避免深色下窗口仍是浅色。
         let dark = ctx.style().visuals.dark_mode;
         ctx.show_viewport_immediate(
             id,
@@ -137,6 +139,14 @@ impl App {
                 .with_always_on_top()
                 .with_window_level(egui::WindowLevel::AlwaysOnTop),
             |ctx, _| {
+                // 子视口的主题偏好与岛体保持一致（标题栏、滚动条、内建控件随之变深）。
+                ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
+                ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+                ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if dark {
+                    egui::SystemTheme::Dark
+                } else {
+                    egui::SystemTheme::Light
+                }));
                 let bg = if dark { Color32::from_rgb(28, 28, 31) } else { Color32::from_rgb(246, 247, 249) };
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(16, 14)))

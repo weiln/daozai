@@ -56,10 +56,12 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 10] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "AI 用量", "系统监控"];
-/// AI 用量页与系统监控页（新增的独立页）。
-pub(crate) const AI_USAGE_PAGE: usize = 8;
+pub(crate) const PAGE_NAMES: [&str; 10] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "", "系统监控"];
+/// 系统监控页（新增的独立页）。
 pub(crate) const SYSMON_PAGE: usize = 9;
+/// 页面上真正显示、可开关与排序的页面（`PAGE_NAMES` 的下标，顺序即默认顺序）。
+/// 下标 8 是已下线的「AI 用量」页，只在配置里保留占位，避免挪动其它页的编号。
+pub(crate) const PAGES: [usize; 9] = [0, 1, 2, 3, 4, 5, 6, CALENDAR_PAGE, SYSMON_PAGE];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -745,12 +747,6 @@ pub struct App {
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
     pub(crate) translate: crate::translate_ui::State,
-    /// AI Agent 生命周期状态快照（后台服务线程推送）。
-    pub(crate) agent_status: crate::agent_status::Snapshot,
-    /// 最近一次钩子安装的结果提示（设置页展示）。
-    pub(crate) agent_install_note: String,
-    /// AI 用量与成本分析面板状态。
-    pub(crate) ai_usage: crate::ai_usage_ui::State,
     /// 系统监控快照（后台服务线程推送）。
     pub(crate) sysmon: crate::sysmon::Snapshot,
     /// 通知摘要计数（按 NotifyApp::ALL 顺序；静音/免打扰时累加）。
@@ -776,7 +772,7 @@ impl App {
         let (bw, bh) = if settings.minimal { (BAR_W_MIN, BAR_H_MIN) } else { (BAR_W, BAR_H) };
         let focus_seconds=settings.focus_minutes as f32*60.0;
         let initial_lyrics=settings.lyrics_enabled;
-        let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
+        let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]&&PAGES.contains(page)).unwrap_or(0);
         Self {
             opts,
             settings,
@@ -859,9 +855,6 @@ impl App {
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             translate: crate::translate_ui::State::load(),
-            agent_status: crate::agent_status::Snapshot::default(),
-            agent_install_note: String::new(),
-            ai_usage: crate::ai_usage_ui::State::load(),
             sysmon: crate::sysmon::Snapshot::default(),
             notify_digest_counts: [0; 6],
             updates: Default::default(),
@@ -1334,17 +1327,13 @@ impl App {
     pub fn page(&self) -> usize {
         self.page
     }
-    /// 供外壳线程推送 AI Agent 状态快照。
-    pub fn set_agent_status(&mut self, snapshot: crate::agent_status::Snapshot) {
-        self.agent_status = snapshot;
-    }
     /// 供外壳线程推送系统监控快照。
     pub fn set_sysmon(&mut self, snapshot: crate::sysmon::Snapshot) {
         self.sysmon = snapshot;
     }
 
     pub(crate) fn set_page_visible(&mut self,page:usize,visible:bool) {
-        if !visible && self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1
+        if !visible && PAGES.iter().filter(|page|self.settings.visible_pages[**page]).count()<=1
             && self.settings.visible_pages[page] { return; }
         self.settings.visible_pages[page]=visible;
         if !self.settings.visible_pages[self.page] {
@@ -1353,9 +1342,12 @@ impl App {
     }
 
     fn navigate_page(&mut self,next:bool) {
-        let position=self.settings.page_order.iter().position(|page|*page==self.page).unwrap();
-        for offset in 1..=PAGE_NAMES.len() {
-            let page=self.settings.page_order[(position+if next {offset}else{PAGE_NAMES.len()-offset})%PAGE_NAMES.len()];
+        // 只在仍存在的页面上循环：已下线的页面（如原「AI 用量」）直接跳过。
+        let order:Vec<usize>=self.settings.page_order.iter().copied().filter(|page|PAGES.contains(page)).collect();
+        let Some(position)=order.iter().position(|page|*page==self.page) else { return; };
+        let count=order.len();
+        for offset in 1..=count {
+            let page=order[(position+if next {offset}else{count-offset})%count];
             if self.settings.visible_pages[page] {
                 self.go(page,if next {1.0}else{-1.0});
                 break;
@@ -2406,67 +2398,21 @@ impl App {
         }
     }
 
-    /// AI 状态灯：聚合圆点。红=运行中（呼吸），橙=失败/卡住，绿=完成/空闲。
-    fn paint_agent_dot(&self, painter: &egui::Painter, body: Rect, p: f32) {
-        if !self.settings.agent_status_enabled || self.settings.minimal {
-            return;
-        }
-        // 各工具开关过滤后的聚合状态。
-        let mut worst: Option<(u8, crate::agent_status::Phase)> = None;
-        for (i, kind) in crate::agent_status::AgentKind::ALL.into_iter().enumerate() {
-            if !self.settings.agent_status_agents[i] {
-                continue;
-            }
-            let phase = self.agent_status.phase_of(kind);
-            let sev = phase.severity();
-            if worst.map_or(true, |(s, _)| sev > s) {
-                worst = Some((sev, phase));
-            }
-        }
-        let Some((_, phase)) = worst else { return };
-        use crate::agent_status::Phase;
-        let color = match phase {
-            Phase::Running => Color32::from_rgb(255, 77, 94),
-            Phase::Failed | Phase::Stale => Color32::from_rgb(255, 209, 102),
-            _ => Color32::from_rgb(53, 233, 133),
-        };
-        // 位置：收起态右上角；展开时贴在面板右上角内侧。
-        let (cx, cy) = if p < 0.5 {
-            (body.right() - 7.0, body.top() + 7.0)
-        } else {
-            (body.right() - 14.0, body.top() + 14.0)
-        };
-        // 运行中：呼吸光晕 + 动态缩放。
-        let (glow, radius) = if phase == Phase::Running {
-            let t = (self.t as f32 * 3.0).sin() * 0.5 + 0.5;
-            (0.35 + 0.35 * t, 3.4 + 0.9 * t)
-        } else {
-            (0.0, 3.2)
-        };
-        if glow > 0.0 {
-            painter.circle_filled(Pos2::new(cx, cy), radius + 3.5, paint::alpha(color, glow * 0.5));
-        }
-        painter.circle_filled(Pos2::new(cx, cy), radius, color);
-        if phase == Phase::Running {
-            painter.circle_stroke(Pos2::new(cx, cy), radius + 1.6, egui::Stroke::new(1.0, paint::alpha(color, 0.5)));
-        }
-    }
-
     /// 收起态监控环的排布依据：设置里勾选的读数 + 此刻能读到的读数。
+    ///
+    /// 只有「勾选且读得到」的环占槽位；全部读不到时整组让位，岛体自动收窄，
+    /// 不再为读不到的读数常年保留三个空位。
     pub(crate) fn sysmon_spec(&self) -> crate::bar_layout::SysmonSpec {
         let shown = self.settings.sysmon_metrics;
-        let spec = crate::bar_layout::SysmonSpec {
+        let enabled = self.settings.sysmon_enabled && self.settings.sysmon_hud && !self.settings.minimal;
+        if !enabled { return crate::bar_layout::SysmonSpec::default(); }
+        crate::bar_layout::SysmonSpec {
             shown,
             readable: [
                 self.sysmon.cpu.value().is_some(),
                 self.sysmon.mem_ratio.value().is_some(),
                 self.sysmon.gpu.value().is_some(),
             ],
-        };
-        if self.settings.sysmon_enabled && self.settings.sysmon_hud && !self.settings.minimal && shown.iter().any(|on| *on) && (0..3).any(|i| shown[i] && spec.readable[i]) {
-            spec
-        } else {
-            crate::bar_layout::SysmonSpec { shown: [false; 3], readable: spec.readable }
         }
     }
 
@@ -2494,7 +2440,7 @@ impl App {
                         }
                     }
                 });
-                settings_hint(ui, "任选组合，如只留 C / G；全部取消时收起态不显示监控环（采样继续，可在本页查看）。");
+                settings_hint(ui, "任选组合，如只留 C / G；勾选但此刻读不到的读数不占位，岛体自动缩进（采样继续，可在本页查看）。");
             });
             ui.separator();
             // 读数：不可用显示 —。
@@ -2658,8 +2604,8 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
-            AI_USAGE_PAGE => self.page_ai_usage(c),
             SYSMON_PAGE => self.page_sysmon(c),
+            // 已下线的页面（如原「AI 用量」）落到第一个可用页，避免旧配置停在空白页。
             _ => self.page_settings(c),
         }
     }

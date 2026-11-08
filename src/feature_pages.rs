@@ -1,12 +1,10 @@
-//! 「AI 用量」与「系统监控」两个独立页面。
+//! 「系统监控」独立页面。
 //!
-//! 按 BrimDeck 的设计：顶部有页内切换（用量 / 监控），内容用大号数字、
-//! 进度条与分栏，而不是塞在别的页角落。
+//! 按 BrimDeck 的设计：内容用大号数字与分栏，而不是塞在别的页角落。
 
-use crate::ai_usage::model;
 use crate::app::App;
 use crate::paint::{Card, H};
-use crate::theme::{self, size, W};
+use crate::theme::W;
 use eframe::egui::Color32;
 
 /// 进度条：轨道 + 已用部分。
@@ -19,75 +17,6 @@ fn bar(c: &Card, x: f32, y: f32, w: f32, frac: f32, color: Color32) {
 }
 
 impl App {
-    /// 「AI 用量」页：按工具分栏展示额度与今日/七日 token 与成本。
-    pub(crate) fn page_ai_usage(&mut self, c: &Card) {
-        let now = chrono::Local::now();
-        let clock = now.format("%H:%M").to_string();
-        c.text(380.0, 20.0, &clock, 11.0, W::Regular, Color32::from_gray(140), H::Right);
-
-        let accounts = self.quota.config.accounts.clone();
-        if accounts.is_empty() {
-            c.text(42.0, 62.0, "还没有 AI 账号", 13.0, W::Bold, theme::WHITE, H::Left);
-            c.text(42.0, 80.0, "先在「AI 额度」页添加账号，即可查看用量与成本", 10.5, W::Regular, theme::GRAY, H::Left);
-            return;
-        }
-        // 每列一个工具；最多 3 列，可按账户翻页。
-        let cols = accounts.len().min(3);
-        let col_w = (378.0 - 42.0) / cols as f32;
-        for (i, account) in accounts.iter().take(cols).enumerate() {
-            let x = 42.0 + i as f32 * col_w;
-            let colors = crate::quota_ui::accent_pair(&self.quota.config, account);
-            // 工具名 + 方案徽标
-            c.text(x + 4.0, 38.0, account.provider.name(), 12.5, W::Bold, theme::WHITE, H::Left);
-            // 额度（若已读取）
-            let snapshot = self.quota.rows.get(&account.id).and_then(|r| r.as_ref().ok());
-            let mut y = 54.0;
-            if let Some(s) = snapshot {
-                for window in s.windows.iter().take(2) {
-                    c.text(x + 4.0, y, window.label.as_str(), size::TINY, W::Regular, theme::GRAY, H::Left);
-                    let used = 100.0 - window.remaining as f32;
-                    c.text(x + 4.0, y + 15.0, &format!("{:.0}%", used), 15.0, W::Bold, theme::WHITE, H::Left);
-                    c.text(x + 4.0 + 34.0, y + 15.0, "已用", size::TINY, W::Regular, theme::GRAY, H::Left);
-                    bar(c, x + 4.0, y + 21.0, col_w - 14.0, used / 100.0, colors[0]);
-                    y += 32.0;
-                }
-            } else {
-                c.text(x + 4.0, y + 10.0, "正在查询…", size::TINY, W::Regular, theme::GRAY, H::Left);
-                y += 24.0;
-            }
-            // 今日 / 七日 token 与成本（按该工具过滤）。
-            let today = self.ai_usage_range_for(account.provider.clone(), 1);
-            let week = self.ai_usage_range_for(account.provider.clone(), 7);
-            let ty = 108.0;
-            c.text(x + 4.0, ty, "今日", size::TINY, W::Regular, Color32::from_gray(140), H::Left);
-            c.text(x + 30.0, ty, &model::compact_tokens(today.0), 9.5, W::Regular, Color32::from_gray(200), H::Left);
-            c.text(x + col_w - 14.0, ty, &today.1, 9.5, W::Regular, Color32::from_gray(200), H::Right);
-            c.text(x + 4.0, ty + 14.0, "七日", size::TINY, W::Regular, Color32::from_gray(140), H::Left);
-            c.text(x + 30.0, ty + 14.0, &model::compact_tokens(week.0), 9.5, W::Regular, Color32::from_gray(200), H::Left);
-            c.text(x + col_w - 14.0, ty + 14.0, &week.1, 9.5, W::Regular, Color32::from_gray(200), H::Right);
-            if i + 1 < cols {
-                c.fill(x + col_w - 4.0, 30.0, 1.0, 96.0, 0.0, Color32::from_white_alpha(14));
-            }
-        }
-    }
-
-    /// 某工具在近 days 日的 (tokens, 成本文本)。
-    fn ai_usage_range_for(&self, provider: crate::quota::Provider, days: i64) -> (u64, String) {
-        let now = chrono::Utc::now().timestamp_millis();
-        let range = model::UsageDateRange::recent(days, now);
-        let usage = model::aggregate(&self.ai_usage.snapshot.entries, &[provider], range);
-        let entries: Vec<model::TokenEntry> = self
-            .ai_usage
-            .snapshot
-            .entries
-            .iter()
-            .filter(|e| e.provider == provider && range.contains(e.time))
-            .cloned()
-            .collect();
-        let cost = crate::ai_usage::pricing::summarize(&self.ai_usage.table, &entries);
-        (usage.sums.total, if usage.sums.total > 0 { cost.text() } else { "—".into() })
-    }
-
     /// 「系统监控」页：CPU / GPU / 内存。
     pub(crate) fn page_sysmon(&mut self, c: &Card) {
         let now = chrono::Local::now();

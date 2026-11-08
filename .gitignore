@@ -5,6 +5,7 @@
 /design/
 /BUILD-ORDER-*.md
 /UI-SPEC.md
+/验收报告-岛仔-v*.md
 *.pdb
 *.log
 .env

@@ -8,6 +8,8 @@
 > 本文中所有对参考实现的结论均来自实际阅读源码，非仓库描述。
 > 另有一份 fly-island 逐文件（file:line）分析报告落于 `E:\github\_refs\fly-island\_report\fly-island-feature-report.md`；一份 BrimDeck「用量与成本」逐文件分析报告落在 `docs\BrimDeck-Usage-Cost-Report.md`（含 Rust 映射清单），可作实现期对照。
 
+> **状态（v0.7.0 之后）：** 本文的 P0-1「AI Agent 生命周期状态灯」与 P0-2「AI 编程工具用量与成本分析」已随功能下线撤回 —— `src/agent_status.rs`、`src/ai_usage/`、`src/ai_usage_ui.rs` 与「AI 用量」页均已删除。以下章节保留作历史设计记录，不要再据此新增代码；如需重新引入，请先确认产品方向。
+
 ---
 
 ## 0. 现状与基线

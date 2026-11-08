@@ -1563,7 +1563,8 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
     h.app.shelf.items.clear();h.app.todos.items.clear();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.hover(H::local(210.0,18.0),0.3);
-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,8,9,0]),(40.0,[9,8,7,6,5,4,3,2,1,0])] {
+    // 下标 8 是已下线的「AI 用量」页，翻页时直接跳过。
+    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,9,0]),(40.0,[9,7,6,5,4,3,2,1,0])] {
         for page in pages {
             h.wheel(delta);
             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
@@ -1885,7 +1886,9 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true;10]);
+    // 下标 8 是已下线的「AI 用量」页，载入时即关闭。
+    let mut defaults=[true;10];defaults[8]=false;
+    assert_eq!(h.app.settings.visible_pages,defaults);
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1893,7 +1896,7 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,false,true],"已下线的用量页保持关闭");
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
@@ -1901,9 +1904,11 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
     assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false,false]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,true,true],"旧版页面开关应保留，并开启新增的日程 / 用量 / 监控页");
+    // 下标 8 是已下线的「AI 用量」页：迁移时保留其它页，并把它一并关掉。
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,false,true],"旧版页面开关应保留，并开启新增的日程 / 监控页，已下线的用量页关闭");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true;10]);
+    let mut expected=[true;10];expected[8]=false;
+    assert_eq!(crate::model::Settings::load().visible_pages,expected,"缺失配置时默认显示全部页面，只关掉已下线的用量页");
 }
 
 #[test]
@@ -1943,18 +1948,18 @@ fn battery_module_can_disable_only_the_power_warning() {
 fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    // 隐藏后可见页：0(音乐)、2(饮水)、5(邮箱)、8(用量)、9(监控)。
+    // 隐藏后可见页：0(音乐)、2(饮水)、5(邮箱)、9(监控)；8 是已下线的「AI 用量」页。
     for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
-    for expected in [2,5,8,9,0] {
+    for expected in [2,5,9,0] {
         h.click(H::local(398.0,68.0));
         assert_eq!(h.app.page,expected);
         h.hover(H::local(300.0,60.0),0.7);
     }
-    // 圆点只包含启用的 5 个页面：点第一个圆点回到音乐页（0）。
+    // 圆点只包含启用的 4 个页面：点第一个圆点回到音乐页（0）。
     let dot_y = h.app.content_height() - 7.2;
     h.click(H::local(crate::app::PANEL_W_BASE / 2.0 - 20.0, dot_y));
-    assert!(matches!(h.app.page, 0 | 2 | 5 | 8 | 9), "底部圆点应仅包含启用的页面，实际 {}", h.app.page);
+    assert!(matches!(h.app.page, 0 | 2 | 5 | 9), "底部圆点应仅包含启用的页面，实际 {}", h.app.page);
     while h.app.page != 2 {
         h.hover(H::local(300.0, 60.0), 0.4);
         h.click(H::local(398.0, 68.0));
@@ -6197,7 +6202,8 @@ fn wheel_short_lists_turn_pages(){
     h.app.calendar.view.day=day;h.app.calendar.view.month=crate::calendar::month_start(day);h.app.calendar.view.loaded=Some(h.app.calendar.view.month);
     for (count,ended,all_day) in [(0,false,false),(1,false,false),(5,false,false),(8,true,false),(4,false,true)]{
         h.app.calendar.view.events=(0..count).map(|i|crate::mail::Meeting{all_day,title:format!("日程 {i}"),start:if ended{start-7200}else{start+i*60},end:Some(if ended{start-3600}else{start+3600}),at:String::new(),uid:format!("wheel-{i}")}).collect();
-        for (delta,page) in [(-40.0,8),(40.0,6)]{
+        // 7 之后的 8 是已下线的「AI 用量」页，翻页直接到 9（系统监控）。
+        for (delta,page) in [(-40.0,9),(40.0,6)]{
             h.app.show_page(7);h.hover(H::local(300.0,160.0),0.5);h.wheel(delta);
             assert_eq!(h.app.page,page,"日历可见列表未溢出应翻页，条数 {count}");
         }

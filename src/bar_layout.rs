@@ -11,7 +11,8 @@ pub(crate) fn quota_slot(position:usize)->usize {
 pub(crate) const SYSMON: usize = 6;
 pub(crate) fn sysmon_slot(position:usize)->usize { SYSMON + position }
 pub(crate) const SYSMON_COUNT: usize = 3;
-/// 设置了要显示、但此刻读不到值（或还没采到）的环：占用槽位但画成灰环，位置不跳动。
+/// 收起态监控环的排布依据：`shown` 为勾选，`readable` 为此刻是否读得到。
+/// 只有「勾选且读得到」的环占位；读不到的环自动让出槽位，组宽随之收缩。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) struct SysmonSpec {
     pub shown: [bool; 3],
@@ -20,9 +21,13 @@ pub(crate) struct SysmonSpec {
 impl SysmonSpec {
     /// 三个读数都显示、都就读（旧版行为）。
     pub(crate) const ALL: Self = Self { shown: [true; 3], readable: [true; 3] };
-    /// 该环是否占据槽位。
-    pub(crate) fn visible(&self, index: usize) -> bool { self.shown.get(index).copied().unwrap_or(false) }
-    pub(crate) fn any(&self) -> bool { (0..SYSMON_COUNT).any(|i| self.visible(i)) }
+    /// 该环是否占据槽位：勾选了、并且此刻确实读得到。
+    ///
+    /// 勾选却读不到（例如没有 GPU 计数器）时不占位，监控组随之自动缩进；
+    /// 读数恢复后环会重新出现，其它组件位置不跳动。
+    pub(crate) fn visible(&self, index: usize) -> bool {
+        self.shown.get(index).copied().unwrap_or(false) && self.readable.get(index).copied().unwrap_or(false)
+    }
     /// `size` 个环、间距 34 时每个环中心相对组左缘的位置。
     pub(crate) fn centers(&self, size: usize) -> Vec<f32> {
         (0..size.min(SYSMON_COUNT)).filter(|i| self.visible(*i)).enumerate().map(|(k, _)| 13.5 + k as f32 * 34.0).collect()
@@ -89,7 +94,8 @@ impl Layout {
         let mut widths=WIDTHS.to_vec(); widths.resize(WIDTHS.len()+quotas.saturating_sub(3),27.0);
         let mut x=vec![None;widths.len()];let mut cursor=16.0;
         let count=quotas;
-        let sysmon_count=if sysmon.any() {SYSMON_COUNT}else{0};
+        // 只按真正占位的环数量排布：少一个环，组宽就少一截，其它组件自动补位。
+        let sysmon_count=(0..SYSMON_COUNT).filter(|i|sysmon.visible(*i)).count();
         let ring_width=|n:usize| n as f32*27.0+n.saturating_sub(1) as f32*7.0;
         // 默认顺序：电量、吉祥物、时间、系统监控、额度、音乐、专注。无电池时额度提到最前。
         // 无电池时额度（含监控环）提前补位到时钟左侧。
@@ -102,8 +108,8 @@ impl Layout {
                 SYSMON if sysmon_count>0=>{
                     let total=ring_width(sysmon_count);
                     let left=place(&mut cursor,total)-total/2.0;
-                    let centers=sysmon.centers(sysmon_count);
-                    for (i,cx) in (0..sysmon_count).filter(|i|sysmon.visible(*i)).zip(centers) {x[sysmon_slot(i)]=Some(left+cx);}
+                    let centers=sysmon.centers(SYSMON_COUNT);
+                    for (i,cx) in (0..SYSMON_COUNT).filter(|i|sysmon.visible(*i)).zip(centers) {x[sysmon_slot(i)]=Some(left+cx);}
                 },
                 QUOTA if count>0=>{
                     let total=ring_width(count);
@@ -234,6 +240,30 @@ mod tests {
         assert!((0..SYSMON_COUNT).all(|i|layout.x[sysmon_slot(i)].is_none()));
         assert_eq!(SysmonSpec::ALL.centers(3),vec![13.5,47.5,81.5]);
         assert_eq!(SysmonSpec{shown:[true,false,true],readable:[true;3]}.centers(3),vec![13.5,47.5]);
+    }
+
+    #[test]
+    fn unreadable_rings_release_their_slots_and_shrink_the_monitor_group(){
+        // 勾选但读不到的环不再占位：组宽与岛宽都随之收缩，不会留下空槽。
+        let all=Layout::with_sysmon_spec(true,2,SysmonSpec{shown:[true;3],readable:[true;3]},true,true,false,true);
+        for readable in [[true,true,false],[true,false,false],[false,false,false]] {
+            let spec=SysmonSpec{shown:[true;3],readable};
+            let layout=Layout::with_sysmon_spec(true,2,spec,true,true,false,true);
+            let expected=readable.iter().filter(|r|**r).count();
+            let occupied=(0..SYSMON_COUNT).filter(|i|layout.x[sysmon_slot(*i)].is_some()).count();
+            assert_eq!(occupied,expected,"读不到的环不应占位：{readable:?}");
+            assert!(layout.width<all.width,"少一个环就该窄一点：{readable:?}");
+        }
+        // 全部读不到：监控组整体让位，宽度等于完全不设监控组。
+        let none=Layout::with_sysmon_spec(true,2,SysmonSpec{shown:[true;3],readable:[false;3]},true,true,false,true);
+        let off=Layout::with_sysmon_spec(true,2,SysmonSpec::default(),true,true,false,true);
+        assert_eq!(none.width,off.width);
+        assert_eq!(none.x,off.x);
+        // 只剩一个可读：那个环左对齐到组首，中间不留空位。
+        let one=Layout::with_sysmon_spec(true,2,SysmonSpec{shown:[true;3],readable:[false,false,true]},true,true,false,true);
+        let others:Vec<f32>=one.x.iter().enumerate().filter(|(i,_)|!((SYSMON..SYSMON+SYSMON_COUNT).contains(i))).filter_map(|(_,x)|*x).collect();
+        let ring=one.x[sysmon_slot(2)].expect("GPU 可读时应占位");
+        assert!(others.iter().all(|x|(*x-ring).abs()>1.0),"唯一的环不应叠在别的组件上");
     }
 
     #[test]

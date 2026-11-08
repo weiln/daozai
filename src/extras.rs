@@ -1275,13 +1275,15 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","token 用量与成本分析","CPU、内存与 GPU 实时读数"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","（已下线）","CPU、内存与 GPU 实时读数"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
                             let mut movement=None;
                             let row_w=ui.available_width();
-                            for (index,page) in self.settings.page_order.into_iter().enumerate() {
+                            // 只列出仍存在的页面；已下线的页面索引保留在配置里但不再展示。
+                            let pages:Vec<usize>=self.settings.page_order.iter().copied().filter(|page|crate::app::PAGES.contains(page)).collect();
+                            for (index,page) in pages.into_iter().enumerate() {
                                 if index>0 {ui.separator();}
                                 let mut visible=self.settings.visible_pages[page];
                                 let can_change=!visible || self.settings.visible_pages.iter().filter(|enabled|**enabled).count()>1;

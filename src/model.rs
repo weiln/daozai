@@ -245,13 +245,6 @@ pub struct Settings {
     /// 快捷翻译：全局快捷键总开关与默认译向。
     pub translate_enabled: bool,
     pub translate_direction: crate::translate::Direction,
-    /// AI 状态灯：总开关与各工具开关（顺序同 AgentKind::ALL）。
-    pub agent_status_enabled: bool,
-    pub agent_status_agents: [bool; 5],
-    /// AI 用量与成本分析：总开关、统计口径（天）、收起态显示项。
-    pub ai_usage_enabled: bool,
-    pub ai_usage_days: i64,
-    pub ai_usage_hud: bool,
     /// 系统监控：总开关、收起态 HUD，以及 HUD 上显示哪几个读数（CPU / 内存 / GPU，顺序同 `sysmon::METRICS`）。
     pub sysmon_enabled: bool,
     pub sysmon_hud: bool,
@@ -266,7 +259,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, dingtalk_notifications:true, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, clipboard_max_recent: 30, translate_enabled: true, translate_direction: Default::default(), agent_status_enabled: true, agent_status_agents: [true; 5], ai_usage_enabled: true, ai_usage_days: 7, ai_usage_hud: true, sysmon_enabled: true, sysmon_hud: true, sysmon_metrics: [true; 3], dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, dingtalk_notifications:true, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, clipboard_max_recent: 30, translate_enabled: true, translate_direction: Default::default(), sysmon_enabled: true, sysmon_hud: true, sysmon_metrics: [true; 3], dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
     }
 }
 
@@ -330,6 +323,7 @@ impl Settings {
                         }
                     }
                 }
+                // 已下线页面的开关随配置一并忽略：旧文件里的对应位会被下面的 normalize_pages 清掉。
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
@@ -371,14 +365,6 @@ impl Settings {
                 "clipboard_max_recent" => s.clipboard_max_recent = v.parse::<u32>().unwrap_or(30).clamp(5, 200),
                 "translate_enabled" => s.translate_enabled = v != "0",
                 "translate_direction" => s.translate_direction = crate::translate::Direction::parse(&v),
-                "agent_status_enabled" => s.agent_status_enabled = v != "0",
-                "agent_status_agents" if v.len() <= 5 && v.bytes().all(|b| b == b'0' || b == b'1') => {
-                    for (i, b) in v.bytes().enumerate() { s.agent_status_agents[i] = b == b'1'; }
-                    for i in v.len()..5 { s.agent_status_agents[i] = true; }
-                }
-                "ai_usage_enabled" => s.ai_usage_enabled = v != "0",
-                "ai_usage_days" => s.ai_usage_days = match v.parse::<i64>().unwrap_or(7) { 1 => 1, 30 => 30, _ => 7 },
-                "ai_usage_hud" => s.ai_usage_hud = v != "0",
                 "sysmon_enabled" => s.sysmon_enabled = v != "0",
                 "sysmon_hud" => s.sysmon_hud = v != "0",
                 "sysmon_metrics" => s.sysmon_metrics = parse_metrics(&v),
@@ -392,8 +378,19 @@ impl Settings {
                 _ => {}
             }
         }
-        if !s.visible_pages.contains(&true) { s.visible_pages[0]=true; }
+        // 已下线页面（如原「AI 用量」）的索引沿用旧编号，这里统一清掉再兜底。
+        s.normalize_pages();
         s
+    }
+
+    /// 关闭已下线页面，并保证至少有一个存在的页面可见。
+    fn normalize_pages(&mut self) {
+        for page in 0..self.visible_pages.len() {
+            if !crate::app::PAGES.contains(&page) { self.visible_pages[page]=false; }
+        }
+        if !self.visible_pages.iter().enumerate().any(|(page,on)|*on && crate::app::PAGES.contains(&page)) {
+            self.visible_pages[0]=true;
+        }
     }
 
     pub fn save(&self) {
@@ -452,11 +449,6 @@ impl Settings {
                 ("clipboard_max_recent".into(), self.clipboard_max_recent.to_string()),
                 ("translate_enabled".into(), (self.translate_enabled as u8).to_string()),
                 ("translate_direction".into(), self.translate_direction.key().into()),
-                ("agent_status_enabled".into(), (self.agent_status_enabled as u8).to_string()),
-                ("agent_status_agents".into(), self.agent_status_agents.iter().map(|b| if *b {'1'} else {'0'}).collect()),
-                ("ai_usage_enabled".into(), (self.ai_usage_enabled as u8).to_string()),
-                ("ai_usage_days".into(), self.ai_usage_days.to_string()),
-                ("ai_usage_hud".into(), (self.ai_usage_hud as u8).to_string()),
                 ("sysmon_enabled".into(), (self.sysmon_enabled as u8).to_string()),
                 ("sysmon_hud".into(), (self.sysmon_hud as u8).to_string()),
                 ("sysmon_metrics".into(), crate::sysmon::METRICS.iter().zip(self.sysmon_metrics).filter(|(_,on)|*on).map(|(key,_)|*key).collect::<Vec<_>>().join(",")),
