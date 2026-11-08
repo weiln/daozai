@@ -28,6 +28,10 @@ impl<'a> Card<'a> {
         let painter = ui.painter().with_clip_rect(clip);
         Self { ui, painter, origin, s: 1.0, live: true }
     }
+    /// 用指定的 painter 绘制：岛体之外的入口要躲开岛体那层裁剪。
+    pub fn new_with(ui: &'a egui::Ui, painter: &egui::Painter, origin: Pos2, clip: Rect) -> Self {
+        Self { ui, painter: painter.with_clip_rect(clip), origin, s: 1.0, live: true }
+    }
 
     pub fn pos(&self, x: f32, y: f32) -> Pos2 {
         self.origin + Vec2::new(x, y) * self.s

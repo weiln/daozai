@@ -429,9 +429,10 @@ impl eframe::App for Shell {
             if foreground_changed || self.app.pending_messengers.len()!=previous_pending {
                 // 在微信 / QQ 里打开了某个账号的窗口：清掉这个账号的未读。
                 let mut sources:Vec<app::Messenger>=self.app.pending_messengers.iter().map(|u|u.source).collect();sources.dedup();
-                match daozai::wechat::foreground_client(&sources){
+                // 只有用户主动切到该客户端窗口时才清；程序自己让出前台（比如切到本窗口）不得清掉。
+                match daozai::wechat::foreground_client(&sources).filter(|_|foreground_changed){
                     Some((source,pid))=>{
-                        if self.app.pending_messengers.iter().any(|u|u.source==source){daozai::wechat::trace(format!("岛上清除 {} 账号 {pid}（前台切换={foreground_changed}）",source.name()));}
+                        if self.app.pending_messengers.iter().any(|u|u.source==source){daozai::wechat::trace(format!("岛上清除 {} 账号 {pid}（前台切换=是）",source.name()));}
                         self.app.viewed_client(source,pid);
                     }
                     None=>if foreground_changed && !sources.is_empty(){daozai::wechat::trace(format!("前台切换但不是消息客户端主窗口：{}；岛上未读 {:?}",daozai::wechat::describe_foreground(),self.app.pending_messengers.iter().map(|u|(u.source.name(),u.pid)).collect::<Vec<_>>()));},
@@ -450,9 +451,11 @@ impl eframe::App for Shell {
                 if !self.app.pending_messengers.contains(&unread){self.opening_messenger=None;}
                 else if started.elapsed()>=Duration::from_secs(4){
                     self.opening_messenger=None;
+                    // 点「查看」等于用户确认已看过：这种主动操作即使前台判定失败，也把未读收掉。
                     match daozai::wechat::foreground_client(&[unread.source]){
                         Some((source,pid)) if unread.pid==0||unread.pid==pid=>self.app.viewed_client(source,pid),
-                        _=>self.app.say(format!("{}尚未切到前台，可点图标重试",unread.source.name())),
+                        Some((source,pid))=>{self.app.viewed_client(source,pid);}
+                        None=>{self.app.viewed_messenger(unread.source);self.app.say(format!("已清除{}未读",unread.source.name()));}
                     }
                 }
             }

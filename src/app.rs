@@ -1808,8 +1808,11 @@ impl App {
             }
         }
         if let Some(rect)=messenger_rect {
+            // 未读入口可能落在岛体之外：这里必须按卡片自己的裁剪区绘制，
+            // 不能用岛体那层 painter 的裁剪（展开态会让它整个消失）。
             let from=crate::skin_paint::shape_count(&ctx,layer);
-            let c=Card::new(ui,rect.min,rect.intersect(ui.max_rect()));
+            let badge_painter=ctx.layer_painter(layer).with_clip_rect(rect.intersect(ui.max_rect()).expand(2.0));
+            let c=Card::new_with(ui,&badge_painter,rect.min,rect.intersect(ui.max_rect()));
             if outside_badge.is_some() {
                 let c=c.scaled(0.0,0.0,appear);
                 self.draw_unread_capsule(&ctx,&c,rect,env.cursor,&mut cmds);
@@ -2023,9 +2026,10 @@ impl App {
 
     fn messenger_badge_rect(&self,win:Rect,panel:Rect)->Option<Rect>{
         if self.pending_messengers.is_empty() || self.browser_minimal_active && !self.open {return None;}
-        // 完整横幅已包含该来源图标。歌词模式和横幅收起后使用常驻入口。
-        if !self.open && !self.compact_notices() && self.pending_messengers.len()==1
-            && self.notice.as_ref().and_then(|a|a.messenger())==self.pending_messengers.first().map(|u|u.source){return None;}
+        // 完整横幅只在弹出那几秒替代入口：横幅结束（或只剩未读）后，常驻图标照常显示。
+        // 旧写法只要横幅还在就隐藏入口，横幅消失后又靠 notification_bell_until（4.5 秒）才回来，
+        // 这段时间里钉钉/微信既没有横幅也没有图标，看起来就像「没有单独的小图标」。
+        if !self.open && !self.compact_notices() && self.notice.as_ref().and_then(|a|a.messenger())==self.pending_messengers.first().map(|u|u.source) {return None;}
         let bounds=self.screen.map_or(win,|screen|screen.intersect(win));
         let appear=self.messenger_appear();
         if appear>0.02 {

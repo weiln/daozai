@@ -383,7 +383,9 @@ impl App {
         self.pending_messengers.retain(|u|self.settings.notifications && match u.source {
             crate::app::Messenger::Wechat=>self.settings.wechat_notifications,
             crate::app::Messenger::Qq=>self.settings.read_notifications && self.notification_apps.items.iter().any(|(key,_,on)|key=="QQ" && *on),
-            crate::app::Messenger::DingTalk=>self.settings.dingtalk_notifications && self.notification_apps.items.iter().any(|(key,_,on)|key=="DingTalk" && *on),
+            // 任务栏闪动是自有来源，不依赖 Windows 通知中心的按应用开关（前一版误把它当条件，
+            // 只要通知中心里没开启钉钉，刚到的未读会在下一帧被这里抹掉）。
+            crate::app::Messenger::DingTalk=>self.settings.dingtalk_notifications,
         });
         let allowed=|a:&Alert|match &a.source {
             AlertSource::Internal=>true,
