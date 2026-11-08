@@ -7,10 +7,27 @@ pub(crate) const QUOTA: usize = 2;
 pub(crate) fn quota_slot(position:usize)->usize {
     if position<3 {QUOTA+position} else {WIDTHS.len()+position-3}
 }
-/// 系统监控环（CPU / 内存），固定排在额度环之前。
+/// 系统监控环（CPU / 内存 / GPU），固定排在额度环之前。
 pub(crate) const SYSMON: usize = 6;
 pub(crate) fn sysmon_slot(position:usize)->usize { SYSMON + position }
 pub(crate) const SYSMON_COUNT: usize = 3;
+/// 设置了要显示、但此刻读不到值（或还没采到）的环：占用槽位但画成灰环，位置不跳动。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) struct SysmonSpec {
+    pub shown: [bool; 3],
+    pub readable: [bool; 3],
+}
+impl SysmonSpec {
+    /// 三个读数都显示、都就读（旧版行为）。
+    pub(crate) const ALL: Self = Self { shown: [true; 3], readable: [true; 3] };
+    /// 该环是否占据槽位。
+    pub(crate) fn visible(&self, index: usize) -> bool { self.shown.get(index).copied().unwrap_or(false) }
+    pub(crate) fn any(&self) -> bool { (0..SYSMON_COUNT).any(|i| self.visible(i)) }
+    /// `size` 个环、间距 34 时每个环中心相对组左缘的位置。
+    pub(crate) fn centers(&self, size: usize) -> Vec<f32> {
+        (0..size.min(SYSMON_COUNT)).filter(|i| self.visible(*i)).enumerate().map(|(k, _)| 13.5 + k as f32 * 34.0).collect()
+    }
+}
 pub(crate) const MUSIC: usize = 9;
 pub(crate) const FOCUS: usize = 10;
 pub(crate) const BELL: usize = 11;
@@ -63,11 +80,16 @@ impl Layout {
 
     /// `sysmon` 为真时显示 CPU / 内存 / GPU 三个环，作为独立可拖动组排在额度环之前。
     pub fn with_sysmon(battery:bool,quotas:usize,sysmon:bool,music:bool,focus:bool,bell:bool,pet:bool)->Self {
+        Self::with_sysmon_spec(battery,quotas,if sysmon {SysmonSpec::ALL}else{SysmonSpec::default()},music,focus,bell,pet)
+    }
+
+    /// 按设置里勾选的读数（CPU / 内存 / GPU 任意组合）排布系统监控环。
+    pub fn with_sysmon_spec(battery:bool,quotas:usize,sysmon:SysmonSpec,music:bool,focus:bool,bell:bool,pet:bool)->Self {
         fn place(cursor:&mut f32,width:f32)->f32 {let x=*cursor+width/2.0;*cursor+=width+12.0;x}
         let mut widths=WIDTHS.to_vec(); widths.resize(WIDTHS.len()+quotas.saturating_sub(3),27.0);
         let mut x=vec![None;widths.len()];let mut cursor=16.0;
         let count=quotas;
-        let sysmon_count=if sysmon {SYSMON_COUNT}else{0};
+        let sysmon_count=if sysmon.any() {SYSMON_COUNT}else{0};
         let ring_width=|n:usize| n as f32*27.0+n.saturating_sub(1) as f32*7.0;
         // 默认顺序：电量、吉祥物、时间、系统监控、额度、音乐、专注。无电池时额度提到最前。
         // 无电池时额度（含监控环）提前补位到时钟左侧。
@@ -80,8 +102,8 @@ impl Layout {
                 SYSMON if sysmon_count>0=>{
                     let total=ring_width(sysmon_count);
                     let left=place(&mut cursor,total)-total/2.0;
-                    let mut cx=left+13.5;
-                    for i in 0..sysmon_count {x[sysmon_slot(i)]=Some(cx);cx+=34.0;}
+                    let centers=sysmon.centers(sysmon_count);
+                    for (i,cx) in (0..sysmon_count).filter(|i|sysmon.visible(*i)).zip(centers) {x[sysmon_slot(i)]=Some(left+cx);}
                 },
                 QUOTA if count>0=>{
                     let total=ring_width(count);
@@ -190,6 +212,30 @@ mod tests {
             assert!(layout.width<crate::app::WIN_W);
         }}}
     }
+    #[test]
+    fn sysmon_spec_places_only_selected_rings(){
+        // 任意组合：只有勾选的环占位，组宽随之变化，且互不重叠。
+        for bits in 1u8..8 {
+            let shown=[bits&1!=0,bits&2!=0,bits&4!=0];
+            let spec=SysmonSpec{shown,readable:[true;3]};
+            let n=shown.iter().filter(|on|**on).count();
+            for quotas in 0..=4 {for battery in [false,true] {
+                let mut layout=Layout::with_sysmon_spec(battery,quotas,spec,true,true,false,true);
+                layout.reorder(&DEFAULT_ORDER);
+                let rings:Vec<_>=(0..SYSMON_COUNT).filter(|i|spec.visible(*i)).map(|i|layout.x[sysmon_slot(i)]).collect();
+                assert_eq!(rings.iter().filter(|x|x.is_some()).count(),n);
+                let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|(x-layout.widths[i]/2.0,x+layout.widths[i]/2.0))).collect();
+                boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
+                assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9),"组合 {bits} 的圆环挤在一起");
+            }}
+        }
+        // 一个都不勾：监控组不占位。
+        let layout=Layout::with_sysmon_spec(true,2,SysmonSpec{shown:[false;3],readable:[true;3]},true,true,false,true);
+        assert!((0..SYSMON_COUNT).all(|i|layout.x[sysmon_slot(i)].is_none()));
+        assert_eq!(SysmonSpec::ALL.centers(3),vec![13.5,47.5,81.5]);
+        assert_eq!(SysmonSpec{shown:[true,false,true],readable:[true;3]}.centers(3),vec![13.5,47.5]);
+    }
+
     #[test]
     fn clock_12h_keeps_components_separate_in_custom_orders(){
         for order in [DEFAULT_ORDER,[FOCUS,MUSIC,SYSMON,QUOTA,CLOCK,PET,BATTERY]] {

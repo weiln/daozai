@@ -229,14 +229,12 @@ impl App {
             let extra=if let Some(text)=self.quota.balance_text(&account.id){ctx.fonts(|fonts|fonts.layout_no_wrap(text,theme::font(theme::size::PILL_CLOCK,W::Bold),theme::WHITE).size().x).ceil()+6.0}else if self.quota.balance_loading(&account.id){22.0}else{0.0};Some((position,extra))
         }).collect()
     }
-    /// 收起态的系统监控环：CPU（蓝）与内存（青），排在额度环之前。
+    /// 收起态的系统监控环：CPU（蓝）/ 内存（青）/ GPU（紫），按设置勾选的组合显示，排在额度环之前。
     pub(crate) fn draw_sysmon_bar(&mut self,c:&Card,cx:f32,layout:&crate::bar_layout::Layout){
-        use crate::sysmon::Reading;
-        // 内存环排第二（更靠内），CPU 在前。
-        let items=[(crate::bar_layout::sysmon_slot(0),"C",self.sysmon.cpu.clone(),Color32::from_rgb(40,130,255)),
-                   (crate::bar_layout::sysmon_slot(1),"M",self.sysmon.mem_ratio.clone(),Color32::from_rgb(0,200,190)),
-                   (crate::bar_layout::sysmon_slot(2),"G",self.sysmon.gpu.clone(),Color32::from_rgb(200,110,220))];
-        for (slot,label,reading,color) in items {
+        use crate::sysmon::{Metric,Reading};
+        for metric in Metric::ALL {
+            let slot=crate::bar_layout::sysmon_slot(metric.index());
+            let (label,reading,color)=(metric.short(),metric.reading(&self.sysmon).clone(),metric.ring_color());
             let Some(x)=layout.x[slot].map(|x|cx+x) else{continue};
             let alpha=layout.pet_clearance(slot);
             let faded=c.faded(alpha);let c=&faded;
@@ -264,7 +262,7 @@ impl App {
                     c.centered_text(x,15.0,label,7.5,W::Bold,Color32::from_gray(130),H::Center);
                 }
             }
-            let full=match label {"C"=>"CPU","G"=>"GPU",_=>"内存"};
+            let full=metric.label();
             let tip=match &reading {
                 Reading::Known(v)=>format!("{full} {v:.0}%"),
                 Reading::Unknown(_)=>format!("{full} 暂不可读"),

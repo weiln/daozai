@@ -1585,12 +1585,9 @@ impl App {
         self.update_media(env,&ctx);
         let bell=self.t<self.notification_bell_until&&!self.compact_notices();
         self.resident_power=(env.battery,env.charging);
-        // 系统监控环（CPU / 内存）排在额度环之前；有任一读数才显示。
-        let sysmon_rings=self.settings.sysmon_enabled
-            && self.settings.sysmon_hud
-            && !self.settings.minimal
-            && (self.sysmon.cpu.value().is_some()||self.sysmon.mem_ratio.value().is_some()||self.sysmon.gpu.value().is_some());
-        let mut layout=Layout::with_sysmon(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),sysmon_rings,self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
+        // 系统监控环（CPU / 内存 / GPU，按设置勾选）排在额度环之前；勾选项此刻都读不到时才收起。
+        let sysmon_spec=self.sysmon_spec();
+        let mut layout=Layout::with_sysmon_spec(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),sysmon_spec,self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
         layout.reorder(&self.settings.resident_order);
         for (position,extra) in self.quota_balance_layout(&ctx){layout.balance_tail(position,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
@@ -2455,16 +2452,50 @@ impl App {
         }
     }
 
-    /// AI 用量摘要：仅收起态、且开启时，在岛体左下角显示一小段文字。
-    /// 系统监控设置（在「常规」页调用）：开关、收起态 HUD、各读数快照。
+    /// 收起态监控环的排布依据：设置里勾选的读数 + 此刻能读到的读数。
+    pub(crate) fn sysmon_spec(&self) -> crate::bar_layout::SysmonSpec {
+        let shown = self.settings.sysmon_metrics;
+        let spec = crate::bar_layout::SysmonSpec {
+            shown,
+            readable: [
+                self.sysmon.cpu.value().is_some(),
+                self.sysmon.mem_ratio.value().is_some(),
+                self.sysmon.gpu.value().is_some(),
+            ],
+        };
+        if self.settings.sysmon_enabled && self.settings.sysmon_hud && !self.settings.minimal && shown.iter().any(|on| *on) && (0..3).any(|i| shown[i] && spec.readable[i]) {
+            spec
+        } else {
+            crate::bar_layout::SysmonSpec { shown: [false; 3], readable: spec.readable }
+        }
+    }
+
+    /// 系统监控设置（在「常规」页调用）：开关、收起态 HUD、显示哪几个读数、各读数快照。
     pub(crate) fn sysmon_settings(&mut self, ui: &mut egui::Ui) {
         use crate::extras::{setting_row, settings_card, settings_hint, settings_label};
         settings_label(ui, "系统监控");
         settings_card(ui, |ui| {
             // 与其它设置保持一致：setting_row 开关行。
-            setting_row(ui, "监控 CPU / 内存 / GPU", "收起时在岛上显示圆形读数", &mut self.settings.sysmon_enabled);
+            setting_row(ui, "监控 CPU / 内存 / GPU", "每秒采样系统读数，供岛上圆环与本页显示", &mut self.settings.sysmon_enabled);
             ui.separator();
-            setting_row(ui, "显示监控圆环", "在 AI 额度环之前显示 CPU / 内存环", &mut self.settings.sysmon_hud);
+            // 不再放第二个一样的开关：这一行是「圆环总开关」+ 逐项勾选要显示的读数。
+            crate::extras::setting_row(ui, "显示监控圆环", "在 AI 额度环之前显示；右侧勾选要看的读数", &mut self.settings.sysmon_hud);
+            ui.add_enabled_ui(self.settings.sysmon_enabled && self.settings.sysmon_hud, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(crate::extras::SETTINGS_LABEL_W);
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    for (i, metric) in crate::sysmon::Metric::ALL.into_iter().enumerate() {
+                        if crate::extras::settings_check(ui, metric.label(), self.settings.sysmon_metrics[i]).clicked() {
+                            self.settings.sysmon_metrics[i] = !self.settings.sysmon_metrics[i];
+                            // 全部取消：收起态没有环可显示，总开关随之关闭，避免「开着却空着」。
+                            if !self.settings.sysmon_metrics.iter().any(|on| *on) {
+                                self.settings.sysmon_hud = false;
+                            }
+                        }
+                    }
+                });
+                settings_hint(ui, "任选组合，如只留 C / G；全部取消时收起态不显示监控环（采样继续，可在本页查看）。");
+            });
             ui.separator();
             // 读数：不可用显示 —。
             ui.horizontal_wrapped(|ui| {
@@ -2739,6 +2770,10 @@ impl App {
         // 剪贴板记录开关：关闭时同时清掉未固定的记录。
         if self.clipboard.is_enabled() != self.settings.clipboard_history {
             self.clipboard.set_enabled(self.settings.clipboard_history);
+            if !self.settings.clipboard_history {
+                // 关闭记录后列表不再显示，缩略图贴图也一并释放。
+                self.clipboard.thumbnails.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            }
         }
         self.shelf_scroll.target = self.shelf_first as f32;
         self.shelf_scroll.step(dt);

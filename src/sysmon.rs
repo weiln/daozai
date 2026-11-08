@@ -48,24 +48,64 @@ impl Default for Reading {
         Reading::Unknown("尚未读取")
     }
 }
+/// 收起态可显示的读数（顺序固定：CPU、内存、GPU，与 `Settings::sysmon_metrics` 一致）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Metric {
+    Cpu,
+    Mem,
+    Gpu,
+}
+impl Metric {
+    pub const ALL: [Self; 3] = [Self::Cpu, Self::Mem, Self::Gpu];
+    /// 设置文件里用的键。
+    pub fn key(self) -> &'static str {
+        match self { Self::Cpu => "c", Self::Mem => "m", Self::Gpu => "g" }
+    }
+    /// 圆环里的单字母。
+    pub fn short(self) -> &'static str {
+        match self { Self::Cpu => "C", Self::Mem => "M", Self::Gpu => "G" }
+    }
+    /// 设置里与提示里的名字。
+    pub fn label(self) -> &'static str {
+        match self { Self::Cpu => "CPU", Self::Mem => "内存", Self::Gpu => "GPU" }
+    }
+    pub fn ring_color(self) -> eframe::egui::Color32 {
+        use eframe::egui::Color32;
+        match self { Self::Cpu => Color32::from_rgb(40, 130, 255), Self::Mem => Color32::from_rgb(0, 200, 190), Self::Gpu => Color32::from_rgb(200, 110, 220) }
+    }
+    /// 该读数在当前快照里的值。
+    pub fn reading(self, snap: &Snapshot) -> &Reading {
+        match self { Self::Cpu => &snap.cpu, Self::Mem => &snap.mem_ratio, Self::Gpu => &snap.gpu }
+    }
+    /// 在设置里的顺序下标。
+    pub fn index(self) -> usize {
+        match self { Self::Cpu => 0, Self::Mem => 1, Self::Gpu => 2 }
+    }
+}
+/// 设置文件里 `sysmon_metrics` 的键（顺序同 `Metric::ALL`）。
+pub const METRICS: [&str; 3] = ["c", "m", "g"];
+
 impl Snapshot {
-    /// 收起态 HUD 文本：`C 12% M 48%`（仅显示已知项）。
+    /// 收起态 HUD 文本：`C 12% M 48%`（仅显示 `shown` 里勾选且已知的项）。
     pub fn hud_text(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if let Some(v) = self.cpu.value() {
-            parts.push(format!("C {:.0}%", v));
-        }
-        if let Some(v) = self.mem_ratio.value() {
-            parts.push(format!("M {:.0}%", v));
-        }
-        if let Some(v) = self.gpu.value() {
-            parts.push(format!("G {:.0}%", v));
-        }
+        self.hud_text_for([true; 3])
+    }
+    /// `shown` 按 `Metric::ALL` 的顺序表示要显示哪几项。
+    pub fn hud_text_for(&self, shown: [bool; 3]) -> Option<String> {
+        let parts: Vec<String> = Metric::ALL
+            .into_iter()
+            .filter(|metric| shown[metric.index()])
+            .filter_map(|metric| metric.reading(self).value().map(|v| format!("{} {:.0}%", metric.short(), v)))
+            .collect();
         if parts.is_empty() {
             None
         } else {
             Some(parts.join("  "))
         }
+    }
+    /// `shown` 里至少有一项能读到值。
+    pub fn any_known(&self, shown: [bool; 3]) -> bool {
+        Metric::ALL.into_iter().filter(|metric| shown[metric.index()]).any(|metric| metric.reading(self).value().is_some())
     }
 }
 
@@ -355,6 +395,29 @@ mod tests {
         snap.cpu = Reading::Known(12.0);
         snap.mem_ratio = Reading::Known(48.0);
         assert_eq!(snap.hud_text().unwrap(), "C 12%  M 48%");
+    }
+
+    #[test]
+    fn hud_text_follows_selected_metrics() {
+        let mut snap = Snapshot::default();
+        snap.cpu = Reading::Known(12.0);
+        snap.mem_ratio = Reading::Known(48.0);
+        snap.gpu = Reading::Known(73.0);
+        assert_eq!(snap.hud_text_for([true, false, false]).unwrap(), "C 12%");
+        assert_eq!(snap.hud_text_for([false, true, true]).unwrap(), "M 48%  G 73%");
+        assert_eq!(snap.hud_text_for([true, true, true]).unwrap(), "C 12%  M 48%  G 73%");
+        // 一个都没勾 / 勾了但都不可读：不显示。
+        assert!(snap.hud_text_for([false; 3]).is_none());
+        snap.cpu = Reading::Unknown("x");
+        assert!(snap.hud_text_for([true, false, false]).is_none());
+        assert!(snap.any_known([false, true, false]));
+        assert!(!snap.any_known([true, false, false]));
+    }
+
+    #[test]
+    fn metric_keys_match_settings_order() {
+        assert_eq!(Metric::ALL.map(|m| m.key()), METRICS);
+        assert_eq!(Metric::ALL.map(|m| m.index()), [0, 1, 2]);
     }
 
     #[test]

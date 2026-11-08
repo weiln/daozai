@@ -207,18 +207,228 @@ impl History {
     }
 }
 
+/// 图片条目的缩略图（界面把 blob 解码成小尺寸贴图缓存起来）。
+///
+/// blob 是纯内容哈希，同一张图只会解码一次；解码走后台线程，界面先画占位、就绪后再贴图。
+#[derive(Default)]
+pub struct Thumbnails {
+    entries: std::collections::HashMap<String, Entry>,
+    tick: u64,
+    worker: Option<Worker>,
+}
+struct Entry {
+    /// 行内小图（最长边 `THUMB_SIZE`）。
+    thumb: Slot,
+    /// 悬停时的大图（最长边 `PREVIEW_SIZE`），解码好之后一直保留，悬停不必再等。
+    preview: Slot,
+    /// 最近一次被绘制的帧号，按容量淘汰时先丢最久没用的。
+    last_used: u64,
+}
+#[derive(Default)]
+struct Slot {
+    image: Option<eframe::egui::TextureHandle>,
+    /// 已请求解码（避免在结果回来前重复排队）。
+    requested: bool,
+    /// 已确认无法解码（blob 缺失或损坏），不再重试。
+    failed: bool,
+}
+struct Worker {
+    requests: std::sync::mpsc::SyncSender<(String, u32)>,
+    results: std::sync::mpsc::Receiver<(String, Option<eframe::egui::ColorImage>)>,
+}
+/// 行内缩略图的最长边（逻辑像素）。行高 22 多一点，留余量给高 DPI。
+pub const THUMB_SIZE: u32 = 96;
+/// 悬停大图的最长边：足够看清截图里的文字，又不至于占满屏幕。
+pub const PREVIEW_SIZE: u32 = 640;
+/// 同时保留的缩略图数量。
+const THUMB_CAPACITY: usize = 48;
+
+/// 取图结果：已就绪、正在解码、或确认无法解码。
+pub enum Thumb {
+    Ready(eframe::egui::TextureHandle),
+    Loading,
+    Failed,
+}
+
+impl Thumbnails {
+    /// 取行内小图。
+    pub fn get(&mut self, ctx: &eframe::egui::Context, blob: &str, large: bool) -> Thumb {
+        let size = if large { PREVIEW_SIZE } else { THUMB_SIZE };
+        self.request(ctx, blob, size)
+    }
+    /// 直接请求某一档尺寸（两档可以同时排队，共用一次文件读取）。
+    fn request(&mut self, ctx: &eframe::egui::Context, blob: &str, size: u32) -> Thumb {
+        if self.worker.is_none() { self.start(ctx.clone()); }
+        {
+            let worker = self.worker.as_ref().expect("worker 刚启动");
+            while let Ok((blob, image)) = worker.results.try_recv() {
+                let Some(entry) = self.entries.get_mut(&blob) else { continue };
+                let (image_size, slot) = if image.as_ref().is_some_and(|image| image.width().max(image.height()) as u32 > THUMB_SIZE) {
+                    (PREVIEW_SIZE, &mut entry.preview)
+                } else {
+                    (THUMB_SIZE, &mut entry.thumb)
+                };
+                match image {
+                    Some(image) => slot.image = Some(ctx.load_texture(format!("clip:{blob}:{image_size}"), image, eframe::egui::TextureOptions::LINEAR)),
+                    None => slot.failed = true,
+                }
+                slot.requested = false;
+            }
+        }
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        let entry = self.entries.entry(blob.to_string()).or_insert_with(|| Entry { thumb: Slot::default(), preview: Slot::default(), last_used: 0 });
+        entry.last_used = tick;
+        let slot = if size == PREVIEW_SIZE { &mut entry.preview } else { &mut entry.thumb };
+        if let Some(texture) = &slot.image { return Thumb::Ready(texture.clone()); }
+        if slot.failed { return Thumb::Failed; }
+        if !slot.requested {
+            let worker = self.worker.as_ref().expect("worker 刚启动");
+            if worker.requests.try_send((blob.to_string(), size)).is_ok() { slot.requested = true; }
+        }
+        if self.entries.len() > THUMB_CAPACITY {
+            let in_use = |entry: &&Entry| entry.thumb.requested || entry.preview.requested;
+            if let Some(oldest) = self.entries.iter()
+                .filter(|(key, entry)| key.as_str() != blob && !in_use(entry))
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        Thumb::Loading
+    }
+    /// 测试用：直接把已解码好的贴图放进缓存，跳过后台线程。
+    #[cfg(test)]
+    pub fn insert_decoded(&mut self, blob: &str, image: eframe::egui::TextureHandle) {
+        self.tick = self.tick.wrapping_add(1);
+        let slot = Slot { image: Some(image), requested: false, failed: false };
+        self.entries.insert(blob.to_string(), Entry { thumb: slot, preview: Slot::default(), last_used: self.tick });
+    }
+    /// 缓存的缩略图数量（测试用）。
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    /// 已排队的解码请求数（测试用）。
+    #[cfg(test)]
+    pub fn pending(&self) -> usize {
+        self.entries.values().map(|entry| entry.thumb.requested as usize + entry.preview.requested as usize).sum()
+    }
+    /// 只保留这些 blob 的缩略图（历史被清空或条目被删除后释放贴图）。
+    pub fn retain(&mut self, blobs: &[String]) {
+        self.entries.retain(|blob, _| blobs.contains(blob));
+    }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+    fn start(&mut self, ctx: eframe::egui::Context) {
+        let (request_tx, requests) = std::sync::mpsc::sync_channel::<(String, u32)>(16);
+        let (results, result_rx) = std::sync::mpsc::sync_channel(16);
+        let dir = blobs_dir();
+        std::thread::Builder::new().name("daozai-clip-thumbs".into()).spawn(move || {
+            // 同一张图的两次请求（小图 + 大图）共用一次读取和解码。
+            let mut cache: Option<(String, eframe::egui::ColorImage)> = None;
+            while let Ok((blob, size)) = requests.recv() {
+                let full = match &cache {
+                    Some((cached, image)) if *cached == blob => Some(image.clone()),
+                    _ => std::fs::read(dir.join(&blob)).ok().and_then(|bytes| decode_image(&bytes)),
+                };
+                let Some(full) = full else {
+                    cache = None;
+                    if results.send((blob, None)).is_err() { break; }
+                    ctx.request_repaint();
+                    continue;
+                };
+                if cache.as_ref().is_none_or(|(cached, _)| *cached != blob) { cache = Some((blob.clone(), full.clone())); }
+                let image = shrink(&full, size);
+                if results.send((blob, Some(image))).is_err() { break; }
+                ctx.request_repaint();
+            }
+        }).ok();
+        self.worker = Some(Worker { requests: request_tx, results: result_rx });
+    }
+}
+
+/// 读取 PNG blob 并缩放到最长边 `max`；解码失败返回 None。纯逻辑，可单测。
+pub fn load_thumbnail(path: &std::path::Path, max: u32) -> Option<eframe::egui::ColorImage> {
+    let bytes = std::fs::read(path).ok()?;
+    thumbnail_from_bytes(&bytes, max)
+}
+
+/// 解码 PNG / JPEG / GIF 等为 RGBA 图像。纯逻辑，可单测。
+fn decode_image(bytes: &[u8]) -> Option<eframe::egui::ColorImage> {
+    let image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    if image.width() == 0 || image.height() == 0 { return None; }
+    Some(eframe::egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
+}
+
+/// PNG 字节 → 缩略图。纯逻辑，可单测。
+pub fn thumbnail_from_bytes(bytes: &[u8], max: u32) -> Option<eframe::egui::ColorImage> {
+    Some(shrink(&decode_image(bytes)?, max))
+}
+
+/// 按最长边缩放（不放大）。纯逻辑，可单测。
+fn shrink(image: &eframe::egui::ColorImage, max: u32) -> eframe::egui::ColorImage {
+    if image.width() as u32 <= max && image.height() as u32 <= max { return image.clone(); }
+    let w = (image.width() as u32).max(1);
+    let h = (image.height() as u32).max(1);
+    let scale = max as f32 / w.max(h) as f32;
+    let (tw, th) = (((w as f32) * scale).round().max(1.0) as usize, ((h as f32) * scale).round().max(1.0) as usize);
+    let mut out = eframe::egui::ColorImage::new([tw, th], image.pixels[0]);
+    for y in 0..th {
+        for x in 0..tw {
+            // 盒式平均：缩小时比最近邻清楚得多，尤其是截图里的文字。
+            let x0 = x * w as usize / tw;
+            let x1 = ((x + 1) * w as usize / tw).max(x0 + 1).min(w as usize);
+            let y0 = y * h as usize / th;
+            let y1 = ((y + 1) * h as usize / th).max(y0 + 1).min(h as usize);
+            let (mut r, mut g, mut b, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let p = image.pixels[sy * image.width() + sx];
+                    r += p.r() as u64; g += p.g() as u64; b += p.b() as u64; a += p.a() as u64; n += 1;
+                }
+            }
+            let n = n.max(1);
+            out.pixels[y * tw + x] = eframe::egui::Color32::from_rgba_unmultiplied((r / n) as u8, (g / n) as u8, (b / n) as u8, (a / n) as u8);
+        }
+    }
+    out
+}
+
+/// 原始图片尺寸（悬停提示框里显示「1920 × 1080」这类信息）。纯逻辑。
+pub fn image_size(path: &std::path::Path) -> Option<(u32, u32)> {
+    let bytes = std::fs::read(path).ok()?;
+    image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
+}
+
+/// 悬停提示框里的大图：最长边 300 逻辑点（截图里的字也能看清）。
+pub const HOVER_MAX_SIDE: f32 = 300.0;
+/// 悬停多久才弹出大图（与 egui 默认提示框节奏一致，避免鼠标划过时闪图）。
+pub const HOVER_DELAY: f64 = 0.35;
+
+/// 大图在卡片里占的位置：等比缩放到最长边不超过 `HOVER_MAX_SIDE`，且不放大。
+pub fn hover_image_size(texture: eframe::egui::Vec2) -> eframe::egui::Vec2 {
+    let longest = texture.x.max(texture.y).max(1.0);
+    let scale = 1.0_f32.min(HOVER_MAX_SIDE / longest);
+    eframe::egui::vec2((texture.x * scale).round().max(1.0), (texture.y * scale).round().max(1.0))
+}
+
 /// 界面与监听线程共用。
 #[derive(Clone)]
 pub struct Shared {
     pub history: Arc<Mutex<History>>,
     pub enabled: Arc<AtomicBool>,
+    /// 图片缩略图缓存（仅界面线程使用）。
+    pub thumbnails: Arc<Mutex<Thumbnails>>,
 }
 
 impl Shared {
     pub fn new(enabled: bool) -> Self {
         let mut history = History::load();
         history.max_recent = crate::model::Settings::load().clipboard_max_recent as usize;
-        Self { history: Arc::new(Mutex::new(history)), enabled: Arc::new(AtomicBool::new(enabled)) }
+        Self { history: Arc::new(Mutex::new(history)), enabled: Arc::new(AtomicBool::new(enabled)), thumbnails: Arc::new(Mutex::new(Thumbnails::default())) }
     }
     pub fn set_enabled(&self, on: bool) { self.enabled.store(on, Ordering::Relaxed); }
     pub fn is_enabled(&self) -> bool { self.enabled.load(Ordering::Relaxed) }
@@ -468,7 +678,7 @@ mod tests {
 
     #[test]
     fn history_copy_preserves_order_but_external_copy_promotes() {
-        let shared = Shared { history: Default::default(), enabled: Arc::new(AtomicBool::new(true)) };
+        let shared = Shared { history: Default::default(), enabled: Arc::new(AtomicBool::new(true)), thumbnails: Default::default() };
         shared.lock().items.clear();
         shared.record("较早的一条");
         shared.record("最近的一条");
@@ -562,6 +772,80 @@ mod tests {
         assert!(h.push("文字", "08:03"));
         // 上限 2 条未固定。
         assert_eq!(h.items.iter().filter(|c| !c.pinned).count(), 2);
+    }
+
+    #[test]
+    fn thumbnail_scales_png_to_fit_and_rejects_garbage() {
+        // 构造 200×100 的 PNG，缩略图最长边 96 → 96×48。
+        let mut img = image::RgbaImage::new(200, 100);
+        for (x, y, p) in img.enumerate_pixels_mut() { *p = image::Rgba([x as u8, (y * 2) as u8, 128, 255]); }
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        let png = out.into_inner();
+        let thumb = thumbnail_from_bytes(&png, THUMB_SIZE).expect("PNG 应可解码为缩略图");
+        assert_eq!(thumb.size, [96, 48]);
+        // 同一张图的悬停大图按 PREVIEW_SIZE 缩放，比例不变。
+        let large = thumbnail_from_bytes(&png, PREVIEW_SIZE).unwrap();
+        assert_eq!(large.size, [200, 100], "原图小于大图上限时不放大");
+        // 小图不放大。
+        let mut small = image::RgbaImage::new(8, 6);
+        small.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        small.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        assert_eq!(thumbnail_from_bytes(&out.into_inner(), THUMB_SIZE).unwrap().size, [8, 6]);
+        assert!(thumbnail_from_bytes(b"not an image", THUMB_SIZE).is_none());
+        assert!(load_thumbnail(std::path::Path::new("不存在的文件.png"), THUMB_SIZE).is_none());
+    }
+
+    #[test]
+    fn preview_preserves_aspect_and_box_filters_color() {
+        // 4×1 的红蓝条纹缩到 2×1：每格取两个像素的平均，颜色不会丢。
+        let mut img = image::RgbaImage::new(4, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 0, 255, 255]));
+        img.put_pixel(2, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(3, 0, image::Rgba([0, 0, 255, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        let small = thumbnail_from_bytes(&out.into_inner(), 2).unwrap();
+        assert_eq!(small.size, [2, 1]);
+        // 盒式平均把红蓝混成紫色；右侧像素来自第 3、4 列，同样是红蓝各一半。
+        let left = small.pixels[0];
+        assert!((left.r() as i32 - 128).abs() <= 2 && (left.b() as i32 - 128).abs() <= 2, "应取两列平均值，实际 {left:?}");
+        assert_eq!(small.pixels[0], small.pixels[1]);
+        // 超长竖图缩到 2 时高度成正比（不压成正方形）。
+        let mut tall = image::RgbaImage::new(10, 100);
+        for p in tall.pixels_mut() { *p = image::Rgba([10, 200, 30, 255]); }
+        let mut out = std::io::Cursor::new(Vec::new());
+        tall.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        assert_eq!(thumbnail_from_bytes(&out.into_inner(), 20).unwrap().size, [2, 20]);
+    }
+
+    #[test]
+    fn hover_preview_is_requested_separately_and_sizes_capped() {
+        let ctx = eframe::egui::Context::default();
+        let mut thumbs = Thumbnails::default();
+        // 第一次取小图：排队，返回 Loading（不会立刻有图）。
+        assert!(matches!(thumbs.get(&ctx, "a.png", false), Thumb::Loading));
+        // 同一张图再要小图不会重复排队；要大图是另一档尺寸，会再排一次。
+        assert_eq!(thumbs.pending(), 1);
+        assert!(matches!(thumbs.get(&ctx, "a.png", false), Thumb::Loading));
+        assert_eq!(thumbs.pending(), 1);
+        assert!(matches!(thumbs.get(&ctx, "a.png", true), Thumb::Loading));
+        assert_eq!(thumbs.pending(), 1 + 1, "大图与小图各排一次");
+        // 大图展示尺寸：等比缩放到最长边 300，不放大。
+        assert_eq!(hover_image_size(eframe::egui::vec2(1920.0, 1080.0)), eframe::egui::vec2(300.0, 169.0));
+        assert_eq!(hover_image_size(eframe::egui::vec2(120.0, 80.0)), eframe::egui::vec2(120.0, 80.0));
+        assert_eq!(hover_image_size(eframe::egui::vec2(40.0, 900.0)), eframe::egui::vec2(13.0, 300.0));
+    }
+
+    #[test]
+    fn original_image_size_is_read_from_headers() {
+        let path = std::env::temp_dir().join(format!("daozai-size-{}.png", std::process::id()));
+        image::RgbaImage::new(37, 19).save(&path).unwrap();
+        assert_eq!(image_size(&path), Some((37, 19)));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(image_size(&path), None);
     }
 
     #[test]

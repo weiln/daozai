@@ -2,7 +2,10 @@ use crate::{bar_layout::*,paint::{self,Card,H},theme::{self,W}};
 use eframe::egui::{self,Color32,RichText,Rect,Pos2,Vec2};
 
 pub(crate) fn preview_layout(order:&[usize],quotas:usize)->Layout {
-    let mut layout=Layout::with_sysmon(true,quotas.max(1),true,true,true,false,true);
+    preview_layout_spec(order,quotas,SysmonSpec::ALL)
+}
+pub(crate) fn preview_layout_spec(order:&[usize],quotas:usize,sysmon:SysmonSpec)->Layout {
+    let mut layout=Layout::with_sysmon_spec(true,quotas.max(1),sysmon,true,true,false,true);
     layout.reorder(order);layout
 }
 
@@ -19,7 +22,8 @@ impl crate::app::App {
         });
         ui.add_space(12.0);
         let indices=self.quota_bar_indices();let count=indices.len();
-        let mut layout=preview_layout(&order,count);
+        let sysmon=SysmonSpec{shown:self.settings.sysmon_metrics,readable:[true;3]};
+        let mut layout=preview_layout_spec(&order,count,sysmon);
         for (position,extra) in self.quota_balance_layout(ui.ctx()){layout.balance_tail(position,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
         let (stage,_)=ui.allocate_exact_size(Vec2::new(ui.available_width(),100.0),egui::Sense::hover());
@@ -58,14 +62,14 @@ impl crate::app::App {
             let Some(slot_x)=layout.x[slot] else{continue};
             let x=cx+slot_x;
             let width=match slot{CLOCK=>if self.settings.clock_period!=0 {84.0}else{44.0},BATTERY=>20.0,PET=>32.0,MUSIC=>14.0,FOCUS=>crate::focus_bar::WIDTH,
-                SYSMON=>{let (l,r)=group_span((0..SYSMON_COUNT).map(sysmon_slot).collect());r-l},
+                SYSMON=>{let (l,r)=group_span((0..SYSMON_COUNT).filter(|i|sysmon.visible(*i)).map(sysmon_slot).collect());r-l},
                 _=>{
                 let (l,r)=group_span(layout.quota_slots().collect());
                 r-l
             }};
             let left=match slot{
                 QUOTA=>{let (l,_)=group_span(layout.quota_slots().collect());cx+l},
-                SYSMON=>{let (l,_)=group_span((0..SYSMON_COUNT).map(sysmon_slot).collect());cx+l},
+                SYSMON=>{let (l,_)=group_span((0..SYSMON_COUNT).filter(|i|sysmon.visible(*i)).map(sysmon_slot).collect());cx+l},
                 _=>x-width/2.0,
             };
             let rect=card.rect(left-5.0,1.0,width+10.0,28.0);
@@ -78,7 +82,7 @@ impl crate::app::App {
             let dx=if is_dragged{pointer.map(|p|((p.x-origin.x)/scale-(left+width/2.0)).clamp(-left,layout.width-left-width)).unwrap_or(0.0)}else{0.0};
             if is_dragged {ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);}
             else if response.hovered(){ui.painter().rect_filled(rect,6.0,Color32::from_white_alpha(18));}
-            let active=match slot{BATTERY=>self.settings.show_battery&&self.resident_power.0.is_some(),PET=>self.settings.pet,QUOTA=>count>0,SYSMON=>self.settings.sysmon_enabled&&self.settings.sysmon_hud,MUSIC=>self.media.is_music(),FOCUS=>self.pomo.running,_=>true};
+            let active=match slot{BATTERY=>self.settings.show_battery&&self.resident_power.0.is_some(),PET=>self.settings.pet,QUOTA=>count>0,SYSMON=>self.settings.sysmon_enabled&&self.settings.sysmon_hud&&self.settings.sysmon_metrics.iter().any(|on|*on),MUSIC=>self.media.is_music(),FOCUS=>self.pomo.running,_=>true};
             let c=card.shifted(dx,0.0).faded(if active||is_dragged{1.0}else{0.38}).ghost();
             match slot{
                 BATTERY=>paint::battery(&c,x,15.0,self.resident_power.0,self.resident_power.1,1.0),

@@ -7,11 +7,57 @@ use crate::mail;
 use crate::paint::{self, capsule, mix, Card, H};
 use crate::smtc::Transport;
 use crate::theme::{self, size, W};
-use eframe::egui::{self, Color32, Pos2, Rect};
+use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 /// 剪贴板分栏一屏显示的条数。
 pub(crate) const CLIP_ROWS: usize = 4;
+
+/// 在卡片局部坐标 (left, cy) 处按最长边 `side` 等比居中画一张图片（剪贴板的图片缩略图）。
+fn draw_thumb(c: &Card, id: egui::TextureId, size: Vec2, left: f32, cy: f32, side: f32) {
+    let k = side / size.x.max(size.y).max(1.0);
+    let draw = size * k;
+    let rect = c.rect(left + (side - draw.x) / 2.0, cy - draw.y / 2.0, draw.x, draw.y);
+    // 先铺一层底色，透明 PNG 也能看清边界。
+    c.painter.rect_filled(rect, 3.0 * c.s, Color32::from_white_alpha(16));
+    c.painter.image(id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+}
+
+/// 剪贴板图片条目的悬停提示：悬停片刻后弹出大图（最长边 300），第一帧先加载大图。
+/// 没有大图可显示时退回普通文字提示。
+fn clip_hover(c: &Card, r: &egui::Response, texture: Option<egui::TextureHandle>, caption: Option<String>) -> egui::Response {
+    let Some(caption) = caption else { return r.clone().on_hover_text("点击复制图片路径"); };
+    let ctx = c.ui.ctx();
+    let id = r.id.with("clip-preview");
+    let now = ctx.input(|i| i.time);
+    let ready = r.hovered() && !ctx.input(|i| i.pointer.any_down());
+    if !ready {
+        ctx.data_mut(|data| data.remove::<f64>(id));
+        return r.clone().on_hover_text(caption);
+    }
+    let Some(texture) = texture else { return r.clone().on_hover_text(caption); };
+    let since = ctx.data_mut(|data| *data.get_temp_mut_or_insert_with(id, || now));
+    if now - since < crate::clipboard::HOVER_DELAY {
+        ctx.request_repaint_after_secs((crate::clipboard::HOVER_DELAY - (now - since)) as f32);
+        return r.clone();
+    }
+    let side = crate::clipboard::hover_image_size(texture.size_vec2());
+    egui::Area::new(id).order(egui::Order::Tooltip).interactable(false)
+        .pivot(egui::Align2::LEFT_TOP)
+        .fixed_pos(r.rect.left_bottom() + egui::vec2(0.0, 6.0))
+        .show(ctx, |ui| {
+            // Frame 自带描边 + 阴影；图片按「控件」的矩形摆放，先占位再画。
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new(&caption).size(11.5));
+                ui.add_space(2.0);
+                let (rect, _) = ui.allocate_exact_size(side, egui::Sense::hover());
+                // 棋盘底或纯色底：透明截图的边界才看得出来。
+                ui.painter().rect_filled(rect, 4.0, Color32::from_gray(if ui.visuals().dark_mode { 56 } else { 236 }));
+                ui.painter().image(texture.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            });
+        });
+    r.clone()
+}
 
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0) as u64;
@@ -630,6 +676,11 @@ impl App {
             c.fill(371.0, top, 2.5, track, 1.25, Color32::from_white_alpha(14));
             c.fill(371.0, y, 2.5, thumb, 1.25, Color32::from_white_alpha(70));
         }
+        // 缩略图缓存只保留还在列表里的图片，删掉的条目随之释放贴图。
+        {
+            let blobs: Vec<String> = items.iter().filter_map(|clip| clip.image.clone()).collect();
+            self.clipboard.thumbnails.lock().unwrap_or_else(|e| e.into_inner()).retain(&blobs);
+        }
         let mut action: Option<(usize, u8)> = None; // 0 复制 1 固定 2 删除
         for (row, (index, clip)) in items.iter().enumerate().skip(self.clip_first).take(CLIP_ROWS).enumerate() {
             let y = 44.0 + row as f32 * 22.5;
@@ -638,14 +689,35 @@ impl App {
             if h > 0.01 {
                 c.fill(48.0, y - 10.0, 323.0, 20.0, 7.0, Color32::from_white_alpha((12.0 * h) as u8));
             }
-            if clip.pinned {
-                paint::pin(c, 58.0, y, 9.0, theme::BLUE);
-            } else {
-                c.circle(58.0, y, 2.2, Color32::from_gray(110));
-            }
             let is_image = clip.kind == crate::clipboard::ClipKind::Image;
+            // 固定标记放在文字右端，左端留给行首图标 / 缩略图。
+            if clip.pinned {
+                paint::pin(c, 67.0, y, 9.0, theme::BLUE);
+            } else {
+                c.circle(67.0, y, 2.2, Color32::from_gray(110));
+            }
+            let mut text_x = 76.0;
+            let mut hover_texture = None;
+            if is_image {
+                // 图片条目：行首直接画真实缩略图，不再只是一个 🖼 符号。
+                if let Some(blob) = &clip.image {
+                    match self.clipboard.thumbnails.lock().unwrap_or_else(|e| e.into_inner()).get(c.ui.ctx(), blob, false) {
+                        crate::clipboard::Thumb::Ready(texture) => {
+                            draw_thumb(c, texture.id(), texture.size_vec2(), 76.0, y, 18.0);
+                            hover_texture = Some(texture.clone());
+                        }
+                        crate::clipboard::Thumb::Failed => paint::file_glyph(c, paint::FileKind::Image, 85.0, y, 16.0),
+                        // 还没解码好：先占住位置，解码完会请求重绘。
+                        crate::clipboard::Thumb::Loading => {
+                            c.fill(77.0, y - 9.0, 16.0, 18.0, 4.0, Color32::from_white_alpha(18));
+                            c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
+                        }
+                    }
+                }
+                text_x = 97.0;
+            }
             let text = if is_image {
-                let mut s = String::from("🖼 图片");
+                let mut s = String::from("图片");
                 if !clip.note.is_empty() { s.push_str(&format!(" · {}", clip.note)); }
                 s
             } else {
@@ -653,13 +725,22 @@ impl App {
                 if !clip.note.is_empty() { s = format!("[{}] {}", clip.note, s); }
                 s
             };
-            let text = c.fit(&text, size::BODY, W::Regular, 210.0);
-            c.text(68.0, y + 3.8, &text, size::BODY, W::Regular, Color32::from_gray(235), H::Left);
+            let text = c.fit(&text, size::BODY, W::Regular, 318.0 - 26.0 - text_x);
+            c.text(text_x, y + 3.8, &text, size::BODY, W::Regular, Color32::from_gray(235), H::Left);
             c.text(318.0, y + 3.5, &clip.at, size::TINY, W::Regular, theme::DIM, H::Right);
             let tip: String = if is_image { clip.note.clone() } else { clip.text.chars().take(400).collect() };
-            let r = r.on_hover_text(format!("{tip}{}\n点击复制", if clip.text.chars().count() > 400 { "…" } else { "" }));
+            let r = if is_image {
+                // 图片条目：悬停时把缩略图放大显示，截图里的内容才看得清；标题行下方给出原图尺寸。
+                let title = if clip.note.is_empty() { "图片".to_string() } else { format!("图片 · {}", clip.note) };
+                let caption = clip.image.as_ref()
+                    .and_then(|blob| crate::clipboard::image_size(&crate::clipboard::blobs_dir().join(blob)))
+                    .map(|(w, h)| format!("{title}  ·  {w} × {h}  ·  点击复制"));
+                clip_hover(c, &r, hover_texture, caption)
+            } else {
+                r.on_hover_text(format!("{tip}{}\n点击复制", if clip.text.chars().count() > 400 { "…" } else { "" }))
+            };
             let pin = c.hit(323.0, y - 9.0, 18.0, 18.0, ("clip-pin", index)).on_hover_text(if clip.pinned { "取消固定" } else { "固定（清空时保留）" });
-            paint::pin(c, 332.0, y, 9.0, if clip.pinned || pin.hovered() { theme::BLUE } else { theme::GRAY });
+            paint::pin(c, 332.0, y, 9.0, if pin.hovered() { theme::WHITE } else { Color32::from_gray(120) });
             let delete = c.hit(345.0, y - 9.0, 17.0, 18.0, ("clip-delete", index)).on_hover_text("删除这条记录");
             paint::close(c, 353.5, y, 2.4, theme::GRAY);
             if delete.clicked() { action = Some((index, 2)); }

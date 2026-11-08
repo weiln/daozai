@@ -1,9 +1,11 @@
 //! 快捷翻译：全局快捷键唤起的独立翻译窗口。
 //!
 //! - 默认 `Alt+C` 唤起/隐藏翻译窗口（Windows：`RegisterHotKey` + 专用消息窗口线程；其它平台禁用）。
-//! - 中英自动识别 / 中译英 / 英译中，后端复用 DeepSeek Chat Completions。
-//! - API Key 存 Windows 凭据管理器（`Daozai.Translate` / `deepseek`），可回退到已连接的 DeepSeek 额度账号密钥。
-//! - 纯逻辑（方向判定、提示词、响应解析）与平台无关，可单测。
+//! - 中英自动识别 / 中译英 / 英译中，后端走 OpenAI 兼容的 Chat Completions 接口：
+//!   地址、模型、密钥都可在设置里填写，默认 DeepSeek（`https://api.deepseek.com/v1`）。
+//! - 设置存本机 `translate.json`（地址与模型，不含密钥）；API Key 存 Windows 凭据管理器
+//!   （`Daozai.Translate` / `api-key`），可回退到已连接的 DeepSeek 额度账号密钥。
+//! - 纯逻辑（方向判定、提示词、地址规范化、响应解析）与平台无关，可单测。
 
 #![allow(dead_code)]
 
@@ -37,6 +39,112 @@ impl Direction {
     pub fn target(self) -> &'static str {
         match self { Self::Auto => "the other language (English if the text is Chinese, otherwise Chinese)", Self::ZhEn => "English", Self::EnZh => "Simplified Chinese" }
     }
+}
+
+/// 默认后端：DeepSeek（OpenAI 兼容接口）。
+pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
+pub const DEFAULT_MODEL: &str = "deepseek-chat";
+
+/// 后端设置：地址 + 模型。密钥单独存凭据管理器。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint {
+    /// 已规范化的 OpenAI 兼容接口根地址，如 `https://api.deepseek.com/v1`。
+    pub base_url: String,
+    pub model: String,
+}
+
+impl Default for Endpoint {
+    fn default() -> Self {
+        Self { base_url: DEFAULT_BASE_URL.into(), model: DEFAULT_MODEL.into() }
+    }
+}
+
+impl Endpoint {
+    /// 从已保存的设置构造：空地址 / 空模型回落到默认值。
+    pub fn new(base_url: &str, model: &str) -> Self {
+        let base_url = base_url.trim();
+        let model = model.trim();
+        Self {
+            base_url: if base_url.is_empty() { DEFAULT_BASE_URL.into() } else { normalize_api_url(base_url) },
+            model: if model.is_empty() { DEFAULT_MODEL.into() } else { model.into() },
+        }
+    }
+    /// 是否为默认后端（用于界面提示与错误信息措辞）。
+    pub fn is_default(&self) -> bool {
+        self.base_url == DEFAULT_BASE_URL && self.model == DEFAULT_MODEL
+    }
+    /// Chat Completions 完整地址。
+    pub fn chat_url(&self) -> String {
+        format!("{}/chat/completions", self.base_url)
+    }
+    /// 后端名称：自定义地址时显示主机名，默认显示 DeepSeek。
+    pub fn label(&self) -> String {
+        if self.base_url == DEFAULT_BASE_URL { return "DeepSeek".into(); }
+        let host = self.base_url.split("://").nth(1).unwrap_or(&self.base_url).split('/').next().unwrap_or("");
+        if host.is_empty() { self.base_url.clone() } else { host.to_string() }
+    }
+}
+
+const SETTINGS_FILE: &str = "translate.json";
+
+impl Endpoint {
+    pub fn load() -> Self {
+        let path = crate::model::config_dir().join(SETTINGS_FILE);
+        let Ok(raw) = std::fs::read(&path) else { return Self::default() };
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) else { return Self::default() };
+        let url = v.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+        let model = v.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        Self::new(url, model)
+    }
+    pub fn save(&self) {
+        let dir = crate::model::config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let body = serde_json::json!({ "base_url": self.base_url, "model": self.model });
+        let _ = crate::model::atomic_write(&dir.join(SETTINGS_FILE), body.to_string().as_bytes());
+    }
+}
+
+/// 校验输入，返回错误提示或规范化后的文本。
+pub fn validate_endpoint(url: &str, model: &str) -> Result<Endpoint, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("请填写 API 地址，例如 https://api.deepseek.com/v1".into());
+    }
+    let endpoint = Endpoint::new(url, model);
+    if model.trim().is_empty() {
+        return Err("请填写模型名称，例如 deepseek-chat".into());
+    }
+    if !(endpoint.base_url.starts_with("https://") || endpoint.base_url.starts_with("http://")) {
+        return Err("API 地址需以 http:// 或 https:// 开头".into());
+    }
+    Ok(endpoint)
+}
+
+/// 用户填写的地址 → OpenAI 兼容的接口根地址（不带结尾斜杠，保留已有的版本段）。
+/// - `https://api.deepseek.com` → `https://api.deepseek.com/v1`
+/// - `https://api.openai.com/v1/chat/completions` → `https://api.openai.com/v1`
+pub fn normalize_api_url(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    while s.ends_with('/') { s.pop(); }
+    let lower = s.to_ascii_lowercase();
+    for suffix in ["/chat/completions", "/completions"] {
+        if let Some(stripped) = lower.strip_suffix(suffix) {
+            s.truncate(stripped.len());
+            break;
+        }
+    }
+    let lower = s.to_ascii_lowercase();
+    // 只填了主机：补上 DeepSeek 的 /v1；其它主机原样使用，用户可自行追加版本段。
+    let host = some_host(&s);
+    if !lower.contains("/v1") && !lower.ends_with("/v3") && !lower.ends_with("/v4") && !lower.contains("/openai/") && host == "api.deepseek.com" {
+        s.push_str("/v1");
+    }
+    while s.ends_with('/') { s.pop(); }
+    s
+}
+
+fn some_host(url: &str) -> String {
+    url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("").split(':').next().unwrap_or("").to_ascii_lowercase()
 }
 
 /// 是否包含 CJK 字符（用于自动方向判定）。
@@ -86,9 +194,9 @@ pub fn validate(text: &str) -> Result<String, String> {
 
 /// 从 Chat Completions 响应体提取译文。
 pub fn parse_response(body: &str) -> Result<String, String> {
-    let v: serde_json::Value = serde_json::from_str(body).map_err(|_| "无法解析 DeepSeek 响应".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|_| "无法解析服务端响应".to_string())?;
     if let Some(err) = v.pointer("/error/message").and_then(|e| e.as_str()) {
-        return Err(format!("DeepSeek 返回错误：{err}"));
+        return Err(format!("翻译服务返回错误：{err}"));
     }
     let choice = v.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first());
     if let Some(reason) = choice.and_then(|c| c.get("finish_reason")).and_then(|r| r.as_str()) {
@@ -101,14 +209,23 @@ pub fn parse_response(body: &str) -> Result<String, String> {
         .and_then(|c| c.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| "DeepSeek 未返回译文".to_string())?;
+        .ok_or_else(|| "翻译服务未返回译文".to_string())?;
     Ok(text)
+}
+
+/// 请求体文本中的越界字面量会被过滤，避免用户填错地址后请求发往非 http(s) 主机。
+pub fn ensure_http(url: &str) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err("API 地址需以 http:// 或 https:// 开头".into())
+    }
 }
 
 // ---------------------------------------------------------------- 密钥
 #[cfg(windows)]
 fn credential() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("Daozai.Translate", "deepseek").map_err(|_| "无法打开 Windows 凭据管理器".into())
+    keyring::Entry::new("Daozai.Translate", "api-key").map_err(|_| "无法打开 Windows 凭据管理器".into())
 }
 #[cfg(windows)]
 pub fn save_secret(key: &str) -> Result<(), String> {
@@ -127,22 +244,30 @@ pub fn forget_secret() {
     if let Ok(entry) = credential() {
         let _ = entry.delete_credential();
     }
+    // 旧版把密钥存在 deepseek 名下，一并清理。
+    if let Ok(entry) = keyring::Entry::new("Daozai.Translate", "deepseek") {
+        let _ = entry.delete_credential();
+    }
 }
 #[cfg(windows)]
 fn load_secret() -> Result<String, String> {
-    credential()?
-        .get_password()
-        .map_err(|error| match error {
-            keyring::Error::NoEntry => "尚未配置 DeepSeek API Key".into(),
-            _ => "暂时无法读取 Windows 凭据".into(),
-        })
+    for account in ["api-key", "deepseek"] {
+        let Ok(entry) = keyring::Entry::new("Daozai.Translate", account) else { continue };
+        if let Ok(key) = entry.get_password().map(|k| k.trim().to_string()) {
+            if !key.is_empty() { return Ok(key); }
+        }
+    }
+    Err("尚未配置翻译 API Key".into())
 }
 
-/// 优先用翻译专用密钥，回退到已连接的 DeepSeek 额度账号。
+/// 优先用翻译专用密钥（自定义后端必须用它），回退到已连接的 DeepSeek 额度账号。
 #[cfg(windows)]
-fn resolve_key() -> Result<String, String> {
+fn resolve_key(endpoint: &Endpoint) -> Result<String, String> {
     if let Ok(k) = load_secret() {
         return Ok(k);
+    }
+    if endpoint.base_url != DEFAULT_BASE_URL || endpoint.model != DEFAULT_MODEL {
+        return Err("请先在设置中为自定义翻译后端填入 API Key".into());
     }
     // 回退：读取额度配置里第一个启用的 DeepSeek 账号的密钥。
     let config = crate::quota::Config::load();
@@ -155,17 +280,19 @@ fn resolve_key() -> Result<String, String> {
             }
         }
     }
-    Err("请先在设置中填入 DeepSeek API Key".into())
+    Err("请先在设置中填入翻译 API Key".into())
 }
 #[cfg(not(windows))]
-fn resolve_key() -> Result<String, String> {
+fn resolve_key(_endpoint: &Endpoint) -> Result<String, String> {
     Err("当前系统不支持安全存储 API Key".into())
 }
 
 // ---------------------------------------------------------------- 调用
-fn request(agent: &ureq::Agent, key: &str, direction: Direction, text: &str) -> Result<String, String> {
+fn request(agent: &ureq::Agent, endpoint: &Endpoint, key: &str, direction: Direction, text: &str) -> Result<String, String> {
+    let url = endpoint.chat_url();
+    ensure_http(&url)?;
     let body = serde_json::json!({
-        "model": "deepseek-chat",
+        "model": endpoint.model,
         "stream": false,
         "temperature": 0.2,
         "messages": [
@@ -174,23 +301,40 @@ fn request(agent: &ureq::Agent, key: &str, direction: Direction, text: &str) -> 
         ]
     });
     let response = agent
-        .post("https://api.deepseek.com/chat/completions")
+        .post(&url)
         .set("Authorization", &format!("Bearer {key}"))
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())
         .map_err(|e| match e {
-            ureq::Error::Status(status, _) => match status {
-                401 => "认证失败，请检查 API Key".to_string(),
-                402 => "账户余额不足".to_string(),
-                429 => "请求过于频繁，请稍后重试".to_string(),
-                s => format!("DeepSeek 返回 HTTP {s}"),
-            },
-            _ => "无法连接 DeepSeek，请检查网络".to_string(),
+            ureq::Error::Status(status, response) => {
+                let detail = http_error_detail(response);
+                match status {
+                    401 | 403 => "认证失败，请检查 API Key".to_string(),
+                    402 => "账户余额不足".to_string(),
+                    404 => format!("接口地址或模型不存在（HTTP 404）{detail}"),
+                    429 => "请求过于频繁，请稍后重试".to_string(),
+                    s => format!("翻译服务返回 HTTP {s}{detail}"),
+                }
+            }
+            _ => format!("无法连接 {}，请检查网络或 API 地址", endpoint.label()),
         })?;
     let mut raw = String::new();
     use std::io::Read;
     response.into_reader().take(1024 * 1024).read_to_string(&mut raw).map_err(|_| "读取响应失败".to_string())?;
     parse_response(&raw)
+}
+
+/// 取错误响应里的 `error.message` 作为补充说明（最多 120 字）。
+fn http_error_detail(response: ureq::Response) -> String {
+    let mut raw = String::new();
+    use std::io::Read;
+    if response.into_reader().take(16 * 1024).read_to_string(&mut raw).is_err() {
+        return String::new();
+    }
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+    let message = v.pointer("/error/message").and_then(|m| m.as_str()).or_else(|| v.get("message").and_then(|m| m.as_str())).unwrap_or("");
+    let message: String = message.chars().take(120).collect();
+    if message.is_empty() { String::new() } else { format!("：{message}") }
 }
 
 /// 一次翻译请求的后台任务。
@@ -200,6 +344,11 @@ pub struct Translate {
 }
 impl Translate {
     pub fn start(direction: Direction, text: String) -> Self {
+        let endpoint = Endpoint::load();
+        Self::start_with(direction, text, endpoint)
+    }
+    /// 使用指定后端（设置里刚改完、还没来得及落盘时也能立即生效）。
+    pub fn start_with(direction: Direction, text: String, endpoint: Endpoint) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("daozai-translate".into())
@@ -207,8 +356,8 @@ impl Translate {
                 let result = (|| {
                     let text = validate(&text)?;
                     let direction = resolve(direction, &text);
-                    let key = resolve_key()?;
-                    request(&crate::quota::http_agent(), &key, direction, &text)
+                    let key = resolve_key(&endpoint)?;
+                    request(&crate::quota::http_agent(), &endpoint, &key, direction, &text)
                 })();
                 let _ = tx.send(result);
             })
@@ -331,5 +480,45 @@ mod tests {
     fn prompt_carries_target_language() {
         assert!(system_prompt(Direction::ZhEn).contains("English"));
         assert!(system_prompt(Direction::EnZh).contains("Chinese"));
+    }
+
+    #[test]
+    fn api_url_normalization() {
+        assert_eq!(normalize_api_url("https://api.deepseek.com"), "https://api.deepseek.com/v1");
+        assert_eq!(normalize_api_url("https://api.deepseek.com/"), "https://api.deepseek.com/v1");
+        assert_eq!(normalize_api_url("https://api.deepseek.com/v1/"), "https://api.deepseek.com/v1");
+        assert_eq!(normalize_api_url("https://api.deepseek.com/v1/chat/completions"), "https://api.deepseek.com/v1");
+        // 其它兼容后端保持原样，不擅自加 /v1。
+        assert_eq!(normalize_api_url("https://api.moonshot.cn/v1"), "https://api.moonshot.cn/v1");
+        assert_eq!(normalize_api_url("https://api.openai.com"), "https://api.openai.com");
+        assert_eq!(normalize_api_url("http://127.0.0.1:11434/v1"), "http://127.0.0.1:11434/v1");
+        assert_eq!(normalize_api_url("https://example.com/chat/completions/"), "https://example.com");
+    }
+
+    #[test]
+    fn endpoint_defaults_and_chat_url() {
+        let default = Endpoint::default();
+        assert_eq!(default.chat_url(), "https://api.deepseek.com/v1/chat/completions");
+        assert!(default.is_default());
+        assert_eq!(default.label(), "DeepSeek");
+        let custom = Endpoint::new("https://api.moonshot.cn/v1", "kimi-k2");
+        assert_eq!(custom.chat_url(), "https://api.moonshot.cn/v1/chat/completions");
+        assert!(!custom.is_default());
+        assert_eq!(custom.label(), "api.moonshot.cn");
+        // 空值回落默认。
+        let blank = Endpoint::new("  ", "");
+        assert_eq!(blank, Endpoint::default());
+    }
+
+    #[test]
+    fn endpoint_validation() {
+        assert!(validate_endpoint("https://api.deepseek.com", "deepseek-chat").is_ok());
+        assert!(validate_endpoint("", "m").is_err());
+        assert!(validate_endpoint("ftp://x", "m").is_err());
+        assert!(validate_endpoint("api.openai.com", "m").is_err());
+        assert!(validate_endpoint("https://api.openai.com/v1", "  ").is_err());
+        assert_eq!(validate_endpoint("https://api.openai.com/v1", " gpt-4o-mini ").unwrap().model, "gpt-4o-mini");
+        assert!(ensure_http("https://a").is_ok());
+        assert!(ensure_http("file:///c:/x").is_err());
     }
 }

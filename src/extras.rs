@@ -936,6 +936,7 @@ impl App {
     }
 }
 
+pub(crate) fn settings_switch(ui:&mut egui::Ui,value:&mut bool)->bool { switch(ui,value) }
 fn switch(ui:&mut egui::Ui,value:&mut bool)->bool {
     let (rect,response)=ui.allocate_exact_size(egui::vec2(34.0,20.0),egui::Sense::click());
     if response.clicked(){*value=!*value;}
@@ -990,6 +991,29 @@ pub(crate) fn settings_segmented<T:PartialEq+Copy>(ui:&mut egui::Ui,value:&mut T
             });
         });
     changed
+}
+
+/// 复选框胶囊：选中时蓝色描边 + 勾，未选中为中性底。返回是否被点击。
+/// 用于一个开关下再细分显示项（如系统监控要显示哪几个环）的场合，比一排开关更紧凑。
+pub(crate) fn settings_check(ui:&mut egui::Ui,label:&str,checked:bool)->egui::Response {
+    let ctx=&ui.ctx().clone();
+    let (rect,response)=ui.allocate_exact_size(egui::vec2(ui.spacing().interact_size.y+ui.spacing().item_spacing.x
+        +ctx.fonts(|f|f.layout_no_wrap(label.to_string(),egui::FontId::proportional(12.0),Color32::WHITE).size().x),ui.spacing().interact_size.y),egui::Sense::click());
+    let hover=response.hovered();
+    let painter=ui.painter();
+    let box_rect=egui::Rect::from_min_size(egui::pos2(rect.left()+1.0,rect.center().y-7.5),egui::vec2(15.0,15.0));
+    let accent=Color32::from_rgb(48,140,255);
+    let border=if checked{accent}else if hover{settings_color(ctx,Color32::from_gray(150),Color32::from_gray(110))}else{settings_color(ctx,Color32::from_gray(110),Color32::from_gray(160))};
+    painter.rect_filled(box_rect,4.0,if checked{accent}else{settings_color(ctx,Color32::from_rgb(45,45,49),Color32::from_rgb(236,239,244))});
+    painter.rect_stroke(box_rect,4.0,egui::Stroke::new(1.2,border),egui::StrokeKind::Inside);
+    if checked {
+        let c=box_rect.center();
+        painter.line_segment([egui::pos2(c.x-3.4,c.y),egui::pos2(c.x-0.8,c.y+2.7)],egui::Stroke::new(1.8,Color32::WHITE));
+        painter.line_segment([egui::pos2(c.x-0.8,c.y+2.7),egui::pos2(c.x+3.6,c.y-2.8)],egui::Stroke::new(1.8,Color32::WHITE));
+    }
+    painter.text(egui::pos2(box_rect.right()+7.0,rect.center().y),egui::Align2::LEFT_CENTER,label,egui::FontId::proportional(12.0),
+        settings_color(ctx,if hover{Color32::WHITE}else{Color32::from_gray(225)},if hover{Color32::from_rgb(20,24,31)}else{Color32::from_rgb(55,60,70)}));
+    response
 }
 
 /// 选项行：标签列之后紧跟控件，同一卡片里所有控件左缘对齐成一条竖线。
@@ -1401,7 +1425,7 @@ impl App {
                                 let opts=[(crate::translate::Direction::Auto,"自动"),(crate::translate::Direction::ZhEn,"中→英"),(crate::translate::Direction::EnZh,"英→中")];
                                 settings_segmented(ui,&mut self.settings.translate_direction,&opts,56.0);
                             });
-                            settings_hint(ui,"自动模式：检测到中文则中译英，否则英译中。密钥保存在 Windows 凭据管理器。");
+                            settings_hint(ui,"自动模式：检测到中文则中译英，否则英译中。支持任意 OpenAI 兼容接口（DeepSeek、OpenAI、Kimi、本地模型等），地址与模型可自定义；密钥保存在 Windows 凭据管理器。");
                             ui.separator();
                             self.translate_settings_button(ui);
                         });

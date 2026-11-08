@@ -6050,6 +6050,80 @@ fn shelf_menu_last_action_fits_inside_window_and_works(){
     assert!(h.app.shelf.items.is_empty());
 }
 
+/// 剪贴板里的图片条目要在行首画出真实缩略图（纹理已在缓存里并被列表引用），而不是只显示「图片」二字。
+#[test]
+fn clipboard_image_rows_show_thumbnails(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    let blob="daozai-test-thumb.png";
+    std::fs::create_dir_all(crate::clipboard::blobs_dir()).unwrap();
+    let texture=h.ctx.load_texture(blob,egui::ColorImage::new([8,8],egui::Color32::from_rgb(220,80,60)),egui::TextureOptions::LINEAR);
+    h.app.clipboard.thumbnails.lock().unwrap_or_else(|e|e.into_inner())
+        .insert_decoded(blob,texture.clone());
+    h.app.clipboard.lock().items.clear();
+    h.app.clipboard.lock().push_image(blob,"09:00");
+    h.app.clipboard.lock().push("图片下面的一条文字","09:01");
+    h.app.show_page(3);
+    h.app.shelf_tab=1;
+    h.hover(H::local(200.0,60.0),0.3);
+    let shown=h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Mesh(mesh) if mesh.texture_id==texture.id()));
+    assert!(shown,"图片条目应引用缓存的缩略图纹理");
+    // 条目被删除后，缩略图缓存随之释放。
+    h.app.clipboard.lock().remove(1);
+    h.hover(H::local(200.0,60.0),0.1);
+    assert_eq!(h.app.clipboard.thumbnails.lock().unwrap_or_else(|e|e.into_inner()).len(),0,"列表里没有的图片不应继续占用贴图");
+}
+
+/// 悬停在图片条目上片刻后，提示框里要出现一张明显更大的缩略图（截图内容才看得清）。
+#[test]
+fn clipboard_image_hover_shows_enlarged_preview(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    // 先让岛体展开、页面切换动画走完（与其它剪贴板用例相同的进入节奏）。
+    let mut h=H::new();let mut raster=crate::preview_raster::Raster::new(crate::app::CANVAS_W as usize*2,WIN_H as usize*2);
+    let blob="daozai-test-hover.png";
+    std::fs::create_dir_all(crate::clipboard::blobs_dir()).unwrap();
+    // 真实 PNG：提示框的标题行会读取原图尺寸。
+    let mut pixels=image::RgbaImage::new(1920,1080);
+    for (x,y,px) in pixels.enumerate_pixels_mut(){*px=image::Rgba([(x%256) as u8,(y%256) as u8,200,255]);}
+    pixels.save(crate::clipboard::blobs_dir().join(blob)).unwrap();
+    let texture=h.ctx.load_texture(blob,egui::ColorImage::new([640,360],egui::Color32::from_rgb(90,160,220)),egui::TextureOptions::LINEAR);
+    h.app.clipboard.thumbnails.lock().unwrap_or_else(|e|e.into_inner()).insert_decoded(blob,texture.clone());
+    h.app.clipboard.lock().items.clear();
+    h.app.clipboard.lock().push_image(blob,"09:00");
+    h.app.show_page(3);
+    h.app.shelf_tab=1;
+    // 图片行在最前（最新的复制排第一行）。
+    let row=H::local(200.0,44.0);
+    let mesh_rect=|mesh:&egui::epaint::Mesh|->Rect{mesh.vertices.iter().fold(Rect::NOTHING,|r,v|r.union(Rect::from_center_size(v.pos,Vec2::ZERO)))};
+    let mut small_line=false;
+    let mut preview=None;
+    for f in 0..180 {
+        let cursor=if f<90 {H::local(210.0,18.0)} else {row};
+        let t=h.t+1.0/60.0;
+        h.t=t;h.cursor=Some(cursor);
+        let env=Env{t,clock:"09:41:00".into(),today:"2026-11-04".into(),date:"11月4日 周三".into(),cursor:Some(cursor),bt_ready:true,..Default::default()};
+        let app=&mut h.app;
+        let output=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W,WIN_H))),time:Some(t),focused:true,
+            events:vec![egui::Event::PointerMoved(cursor)],
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()},
+            |ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H));app.frame(ui,win,&env);});});
+        raster.update_textures(&output.textures_delta);raster.free_textures(&output.textures_delta);
+        if f<90 {continue;}
+        let Mesh_size=|m:&egui::epaint::Mesh|{let r=mesh_rect(m);r.width()*r.height()};
+        if let Some(texture_mesh)=output.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Mesh(m) if m.texture_id==texture.id()=>Some(m),_=>None}).max_by(|a,b|Mesh_size(a).total_cmp(&Mesh_size(b))) {
+            let r=mesh_rect(texture_mesh);
+            if r.width()<=40.0 && r.top()<WIN_H && r.left()<WIN_W {small_line=true;}
+            if r.height()>80.0 {preview=Some(r);}
+        }
+        if preview.is_some() {break;}
+    }
+    assert!(small_line,"行内仍应保留小缩略图");
+    let r=preview.expect("悬停片刻后应弹出放大的预览图");
+    assert!(r.height()>=100.0 && r.height()<=crate::clipboard::HOVER_MAX_SIDE+20.0,"预览高度应明显大于行内缩略图，实际 {}",r.height());
+    assert!(r.top()>row.y-40.0 || r.bottom()<row.y,"预览应贴在光标那一行旁边，而不是压住行内容，实际 top={} row_y={}",r.top(),row.y);
+    assert!(r.width()<=crate::clipboard::HOVER_MAX_SIDE+20.0,"预览宽度不应超过上限，实际 {}",r.width());
+}
+
 #[test]
 fn calendar_add_button_does_not_overlap_the_battery_ring(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());

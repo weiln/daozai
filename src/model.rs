@@ -1,4 +1,4 @@
-//! 持久化与状态模型。
+﻿//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -252,9 +252,10 @@ pub struct Settings {
     pub ai_usage_enabled: bool,
     pub ai_usage_days: i64,
     pub ai_usage_hud: bool,
-    /// 系统监控：总开关、收起态 HUD。
+    /// 系统监控：总开关、收起态 HUD，以及 HUD 上显示哪几个读数（CPU / 内存 / GPU，顺序同 `sysmon::METRICS`）。
     pub sysmon_enabled: bool,
     pub sysmon_hud: bool,
+    pub sysmon_metrics: [bool; 3],
     /// 通知智能聚合：免打扰时段、按应用静音（顺序同 NotifyApp::ALL）、摘要折叠。
     pub dnd_enabled: bool,
     pub dnd_start: u8,
@@ -265,7 +266,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, dingtalk_notifications:true, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, clipboard_max_recent: 30, translate_enabled: true, translate_direction: Default::default(), agent_status_enabled: true, agent_status_agents: [true; 5], ai_usage_enabled: true, ai_usage_days: 7, ai_usage_hud: true, sysmon_enabled: true, sysmon_hud: true, dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, dingtalk_notifications:true, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, clipboard_max_recent: 30, translate_enabled: true, translate_direction: Default::default(), agent_status_enabled: true, agent_status_agents: [true; 5], ai_usage_enabled: true, ai_usage_days: 7, ai_usage_hud: true, sysmon_enabled: true, sysmon_hud: true, sysmon_metrics: [true; 3], dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
     }
 }
 
@@ -380,6 +381,7 @@ impl Settings {
                 "ai_usage_hud" => s.ai_usage_hud = v != "0",
                 "sysmon_enabled" => s.sysmon_enabled = v != "0",
                 "sysmon_hud" => s.sysmon_hud = v != "0",
+                "sysmon_metrics" => s.sysmon_metrics = parse_metrics(&v),
                 "dnd_enabled" => s.dnd_enabled = v != "0",
                 "dnd_start" => s.dnd_start = v.parse::<u8>().unwrap_or(22).min(23),
                 "dnd_end" => s.dnd_end = v.parse::<u8>().unwrap_or(8).min(24),
@@ -457,6 +459,7 @@ impl Settings {
                 ("ai_usage_hud".into(), (self.ai_usage_hud as u8).to_string()),
                 ("sysmon_enabled".into(), (self.sysmon_enabled as u8).to_string()),
                 ("sysmon_hud".into(), (self.sysmon_hud as u8).to_string()),
+                ("sysmon_metrics".into(), crate::sysmon::METRICS.iter().zip(self.sysmon_metrics).filter(|(_,on)|*on).map(|(key,_)|*key).collect::<Vec<_>>().join(",")),
                 ("dnd_enabled".into(), (self.dnd_enabled as u8).to_string()),
                 ("dnd_start".into(), self.dnd_start.to_string()),
                 ("dnd_end".into(), self.dnd_end.to_string()),
@@ -479,6 +482,20 @@ pub struct TodoItem {
     pub repeat: u8,
     /// 每周重复：当天已提醒的日期，第二天自动重新提醒。
     pub reminded_on: Option<String>,
+}
+
+/// 系统监控的显示项：「c,m,g」这样的逗号串。空串或无法识别时按「全部」处理，
+/// 但三个都关掉后保存的是空串——用 "none" 表示「一个都不显示」。
+fn parse_metrics(value: &str) -> [bool; 3] {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "none" { return [false; 3]; }
+    let mut out = [false; 3];
+    for part in value.split([',', ';', ' ']).filter(|p| !p.is_empty()) {
+        for (i, key) in crate::sysmon::METRICS.into_iter().enumerate() {
+            if part == key { out[i] = true; }
+        }
+    }
+    if !out.iter().any(|on| *on) { [true; 3] } else { out }
 }
 
 pub const WEEKDAY_NAMES: [&str; 7] = ["一", "二", "三", "四", "五", "六", "日"];
