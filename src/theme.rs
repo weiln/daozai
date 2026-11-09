@@ -28,6 +28,8 @@ pub const TRACK: Color32 = Color32::from_rgb(36, 36, 39);
 pub const ARROW_BG: Color32 = Color32::from_rgb(48, 48, 51);
 pub const WATER_TRACK: Color32 = Color32::from_rgb(15, 38, 64);
 pub const YELLOW: Color32 = Color32::from_rgb(255, 196, 61);
+/// 淡紫：系统监控页标题的强调色。
+pub const LILAC: Color32 = Color32::from_rgb(186, 156, 255);
 
 pub fn alpha_blue(a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(BLUE.r(), BLUE.g(), BLUE.b(), (255.0 * a) as u8)

@@ -4216,6 +4216,24 @@ fn ui_alignment_layout_gallery(){
 }
 
 #[test]
+fn sysmon_page_title_reads_performance_monitoring(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.pet=false;
+    h.app.show_page(crate::app::SYSMON_PAGE);
+    for _ in 0..60{h.frame(vec![]);}
+    let title=|text:&str|h.shapes.iter().find_map(|s|match &s.shape{
+        egui::Shape::Text(t) if t.galley.text()==text=>Some((t.pos.x,t.galley.job.sections[0].format.color)),
+        _=>None,
+    });
+    let a=title("性能").expect("系统监控页应显示「性能」");
+    let b=title("监控").expect("系统监控页应显示「监控」");
+    assert_eq!(a.1,egui::Color32::WHITE,"「性能」应为白色");
+    assert_eq!(b.1,crate::theme::LILAC,"「监控」应为淡紫色");
+    assert!(b.0>a.0,"「监控」应排在「性能」右侧");
+    assert!(title("岛仔").is_none() && title("设置").is_none(),"系统监控页不应再借用「岛仔设置」标题");
+}
+
+#[test]
 fn meeting_notice_prioritizes_the_start_time_and_keeps_actions_aligned(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for ppp in [1.0,1.25,1.5,2.0]{
