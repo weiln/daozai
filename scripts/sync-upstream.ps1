@@ -61,6 +61,10 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host '  2. git add 冲突文件' -ForegroundColor Gray
     Write-Host '  3. git rebase --continue' -ForegroundColor Gray
     Write-Host '  放弃可用： git rebase --abort' -ForegroundColor Gray
+    Write-Host ''
+    Write-Host '重要：任何一处冲突不知道该怎么合，立刻停下来问，不要猜、不要试。' -ForegroundColor Yellow
+    Write-Host '      拿不准的先 git rebase --abort 回到干净状态，问清楚再重来。' -ForegroundColor Yellow
+    Write-Host '      详见 docs/fork-sync-notes.md 第零节。' -ForegroundColor Yellow
     exit 2
 }
 
