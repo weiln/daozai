@@ -465,18 +465,18 @@ impl App {
     }
 
     // ================= 置物架 =================
-    /// 标题旁的「文件 | 剪贴板」分栏，返回分栏右边缘。
-    /// 页面标题处的「置物架 | 剪贴板」分栏，返回分栏右边缘。
+    /// 页面标题处的「剪贴板 | 置物架」分栏，返回分栏右边缘。
+    /// 显示顺序是剪贴板在前、置物架在后；shelf_tab 仍以 0 = 文件、1 = 剪贴板 索引。
     fn shelf_tabs(&mut self, c: &Card, x: f32) -> f32 {
-        let labels = ["置物架", "剪贴板"];
+        let tabs = [(1usize, "剪贴板"), (0, "置物架")];
         let font = 12.0;
-        let widths: Vec<f32> = labels.iter().map(|l| c.text_w(l, font, W::Bold) + 14.0).collect();
+        let widths: Vec<f32> = tabs.iter().map(|(_, label)| c.text_w(label, font, W::Bold) + 14.0).collect();
         let total = widths.iter().sum::<f32>() + 4.0;
         c.fill(x, 9.5, total, 21.0, 10.5, theme::BTN);
         let mut left = x + 2.0;
-        for (i, (label, w)) in labels.iter().zip(&widths).enumerate() {
-            let selected = self.shelf_tab == i;
-            let r = c.hit(left, 9.5, *w, 21.0, ("shelf-tab", i));
+        for (slot, ((tab, label), w)) in tabs.iter().zip(&widths).enumerate() {
+            let selected = self.shelf_tab == *tab;
+            let r = c.hit(left, 9.5, *w, 21.0, ("shelf-tab", slot));
             let (h, _) = c.hover_t(&r);
             if selected {
                 c.fill(left, 11.5, *w, 17.0, 8.5, Color32::from_gray(88));
@@ -485,7 +485,7 @@ impl App {
             }
             c.text(left + w / 2.0, 24.3, label, font, W::Bold, if selected { theme::WHITE } else { theme::GRAY }, H::Center);
             if r.clicked() && !selected {
-                self.shelf_tab = i;
+                self.shelf_tab = *tab;
                 self.confirm_clear = None;
                 self.clip_confirm_clear = None;
             }
@@ -619,7 +619,7 @@ impl App {
         }
     }
 
-    // ================= 剪贴板（置物架第二个分栏） =================
+    // ================= 剪贴板（置物架第一个分栏） =================
     fn page_clipboard(&mut self, c: &Card, _env: &Env, _cmds: &mut Vec<Cmd>) {
         if !self.settings.clipboard_history {
             c.dashed(42.0, 32.0, 335.0, 91.0, 12.0, 1.2, Color32::from_gray(70), 0.0);

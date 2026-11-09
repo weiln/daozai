@@ -1275,7 +1275,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","（已下线）","CPU、内存与 GPU 实时读数"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","剪贴板历史与临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","（已下线）","CPU、内存与 GPU 实时读数"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1419,17 +1419,15 @@ impl App {
                             ui.separator();
                             setting_row(ui,"全屏时隐藏","游戏、视频和演示全屏时隐藏",&mut self.settings.hide_fullscreen);
                         });
-                        settings_label(ui,"快捷翻译");
+                        settings_label(ui,"便签");
                         settings_card(ui,|ui|{
-                            setting_row(ui,"启用全局快捷键","按 Alt+C 随时唤起独立翻译窗口",&mut self.settings.translate_enabled);
+                            setting_row(ui,"Alt+C 全局快捷键","按 Alt+C 随时唤起便签窗口",&mut self.settings.notes_enabled);
+                            settings_hint(ui,"便签保存在本机 notes.json，不联网；窗口上半部分写内容，下半部分查看、复制和删除历史便签（最多保留 100 条）。");
                             ui.separator();
-                            settings_control_row_right(ui,"默认译向",|ui|{
-                                let opts=[(crate::translate::Direction::Auto,"自动"),(crate::translate::Direction::ZhEn,"中→英"),(crate::translate::Direction::EnZh,"英→中")];
-                                settings_segmented(ui,&mut self.settings.translate_direction,&opts,56.0);
+                            ui.horizontal(|ui|{
+                                if ui.add_sized([120.0,32.0],egui::Button::new("打开便签")).clicked(){self.notes.open_window();}
+                                ui.label(egui::RichText::new(format!("当前 {} 条",self.notes.board.items.len())).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             });
-                            settings_hint(ui,"自动模式：检测到中文则中译英，否则英译中。支持任意 OpenAI 兼容接口（DeepSeek、OpenAI、Kimi、本地模型等），地址与模型可自定义；密钥保存在 Windows 凭据管理器。");
-                            ui.separator();
-                            self.translate_settings_button(ui);
                         });
                         self.sysmon_settings(ui);
                     }

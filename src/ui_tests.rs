@@ -3,7 +3,7 @@ use crate::app::{App, Env, Options, PH, PW, WIN_H, WIN_W};
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use std::sync::Mutex;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::ENV_LOCK;
 
 #[test]
 fn resized_font_atlases_stop_reuploading_and_release_unused_sizes(){
@@ -715,13 +715,26 @@ fn shelf_file_drag_opens_below_the_island_and_cancellation_restores_the_page(){
 }
 
 #[test]
+fn file_drag_switches_to_the_shelf_tab() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.show_page(3);h.app.shelf_tab=1;h.hover(H::local(300.0,60.0),0.8);
+    assert_eq!(h.app.shelf_tab,1,"先停在剪贴板分栏");
+    h.cursor=Some(H::local(300.0,60.0));
+    h.hovered_files.push(egui::HoveredFile{path:Some(crate::model::config_dir().join("拖入置物架.txt")),..Default::default()});
+    h.frame(vec![]);
+    assert!(h.app.drag_hot);
+    assert_eq!(h.app.page,3);
+    assert_eq!(h.app.shelf_tab,0,"文件拖到岛上应自动切到置物架分栏");
+}
+
+#[test]
 fn shelf_quick_drop_in_the_capture_zone_shows_the_added_file(){
-    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.shelf_tab=1;h.frame(vec![]);
     let path=crate::model::config_dir().join("快速拖入.txt");std::fs::create_dir_all(path.parent().unwrap()).unwrap();std::fs::write(&path,"test").unwrap();
     h.cursor=Some(h.file_drop_zone.unwrap().right_bottom()-Vec2::splat(12.0));
     h.dropped_files.push(egui::DroppedFile{path:Some(path.clone()),..Default::default()});
     for _ in 0..90{h.frame(vec![]);}
-    assert!(h.app.open && h.app.page==3);assert_eq!(h.app.shelf.items,vec![path.clone()]);assert!(path.exists());
+    assert!(h.app.open && h.app.page==3);assert_eq!(h.app.shelf_tab,0,"落下文件后应停到置物架分栏");assert_eq!(h.app.shelf.items,vec![path.clone()]);assert!(path.exists());
     let mut h=H::new();for _ in 0..90{h.frame(vec![]);}
     h.cursor=Some(h.file_drop_zone.unwrap().right_bottom()-Vec2::splat(12.0));h.app.settings.visible_pages[3]=false;
     h.dropped_files.push(egui::DroppedFile{path:Some(path),..Default::default()});h.frame(vec![]);
@@ -1555,6 +1568,137 @@ fn arrows_and_dots_switch_pages() {
     h.hover(H::local(300.0, 60.0), 0.8);
     h.click(H::local(398.0, 68.0));
     assert_eq!(h.app.page, 2);
+}
+
+#[test]
+#[ignore="按需导出便签窗口的实际画面"]
+fn notes_gallery() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_NOTES_PREVIEW_DIR").expect("需指定预览目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let now=chrono::Local::now().timestamp();
+    for (name,skin,editing) in [("classic",crate::model::Skin::Classic,false),("cream",crate::model::Skin::Cream,false),("glass-light",crate::model::Skin::GlassLight,false),("glass-dark",crate::model::Skin::GlassDark,true),("fluid",crate::model::Skin::Fluid,false)] {
+        let mut h=H::new();
+        h.app.settings.skin=skin;
+        h.app.notes.board.items=vec![
+            crate::notes::Note{text:"周三前把便签窗口的圆角和对齐再核一遍".into(),at:now},
+            crate::notes::Note{text:"买牛奶、鸡蛋和咖啡豆\n顺路取快递".into(),at:now-86_400*2},
+            crate::notes::Note{text:"这是一条很长的便签，用来确认列表最多显示两行，第三行之后的内容会被省略号收起来，不会把整张卡片撑得很高。".repeat(2).into(),at:now-86_400*4},
+            crate::notes::Note{text:"https://example.com/design-review".into(),at:now-86_400*5},
+        ];
+        if editing {
+            h.app.notes.editing=Some(0);
+            h.app.notes.input="周三前把便签窗口的圆角和对齐再核一遍，顺便确认皮肤跟随。".into();
+        } else {
+            h.app.notes.input="新版便签：Alt+C 唤起，上面写、下面看。".into();
+        }
+        let ppp=2.0;
+        let mut raster=crate::preview_raster::Raster::new((crate::notes_ui::WIDTH*ppp) as usize,(crate::notes_ui::HEIGHT*ppp) as usize);
+        for frame in 0..6 {
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(crate::notes_ui::WIDTH,crate::notes_ui::HEIGHT))),time:Some(frame as f64/60.0),focused:true,
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+            let app=&mut h.app;
+            let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{app.notes_panel(ui);});});
+            raster.update_textures(&output.textures_delta);
+            if frame==5 {
+                // 毛玻璃会透出桌面：预览用一块浅色桌面，看得出玻璃是半透明的。
+                let backdrop = if matches!(skin,crate::model::Skin::Cream|crate::model::Skin::GlassLight|crate::model::Skin::GlassDark) {[0.82,0.84,0.88,1.0]} else {[0.08,0.09,0.12,1.0]};
+                raster.buf.fill(backdrop);
+                raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                image::save_buffer(dest.join(format!("notes-{name}.png")),&rgba,(crate::notes_ui::WIDTH*ppp) as u32,(crate::notes_ui::HEIGHT*ppp) as u32,image::ColorType::Rgba8).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    }
+}
+
+#[test]
+fn clipboard_tab_sits_left_of_shelf_and_switches_both_ways() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.show_page(3);h.hover(H::local(210.0,20.0),0.6);
+    let tab=|h:&H,slot:usize|h.ctx.read_response(egui::Id::new(("card",true,("shelf-tab",slot)))).unwrap().rect;
+    let (left,right)=(tab(&h,0),tab(&h,1));
+    assert!(left.right()<=right.left()+0.01,"两个分栏应按顺序并排");
+    assert!((left.center().y-right.center().y).abs()<0.01,"分栏应在同一条水平线上");
+    let x=|label:&str|h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.pos.x),_=>None}).unwrap();
+    assert!(x("剪贴板")<x("置物架"),"剪贴板应排在置物架前面");
+    h.click(left.center());assert_eq!(h.app.shelf_tab,1,"点左侧分栏应切到剪贴板");
+    h.hover(H::local(210.0,20.0),0.4);
+    h.click(right.center());assert_eq!(h.app.shelf_tab,0,"点右侧分栏应切回置物架");
+}
+
+#[test]
+fn notes_window_inputs_on_top_and_lists_below() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.notes.board.items.clear();
+    h.app.notes.input="买牛奶和鸡蛋".into();
+    let size=Vec2::new(crate::notes_ui::WIDTH,crate::notes_ui::HEIGHT);
+    fn draw(h:&mut H,events:Vec<egui::Event>)->(egui::FullOutput,bool) {
+        let ctx=h.ctx.clone();let app=&mut h.app;let mut close=false;
+        let output=ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::notes_ui::WIDTH,crate::notes_ui::HEIGHT))),time:Some(1.0),events,..Default::default()},|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{close=app.notes_panel(ui);});
+        });
+        (output,close)
+    }
+    let click=|h:&mut H,pos:Pos2|{
+        draw(h,vec![egui::Event::PointerMoved(pos)]);
+        draw(h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+        draw(h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}])
+    };
+    let text_center=|out:&egui::FullOutput,label:&str|out.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None});
+    let (out,_)=draw(&mut h,vec![]);
+    let edit=h.ctx.read_response(egui::Id::new("notes-input")).expect("上半部分应有输入框");
+    assert!(edit.rect.height()>120.0 && edit.rect.top()<size.y*0.5,"输入框应在上半部分并占满一块：{:?}",edit.rect);
+    let save=text_center(&out,"保存到本机").expect("应有保存按钮");
+    let (_,close)=click(&mut h,save);
+    assert!(!close);
+    assert_eq!(h.app.notes.board.items.len(),1,"点保存应记下便签");
+    assert_eq!(h.app.notes.board.items[0].text,"买牛奶和鸡蛋");
+    assert!(h.app.notes.input.is_empty(),"保存后输入框应清空");
+    assert_eq!(crate::notes::Notes::load().items.len(),1,"便签应保存在本机");
+    let (out,_)=draw(&mut h,vec![]);
+    assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="买牛奶和鸡蛋")),"下半部分应列出便签");
+    // 编辑：点列表里的「编辑」，内容回到输入框；保存修改后仍是同一条。
+    let (out,_)=draw(&mut h,vec![]);
+    click(&mut h,text_center(&out,"编辑").unwrap());
+    assert_eq!(h.app.notes.editing,Some(0),"点编辑应进入编辑状态");
+    assert_eq!(h.app.notes.input,"买牛奶和鸡蛋");
+    h.app.notes.input="买牛奶、鸡蛋和咖啡".into();
+    let (out,_)=draw(&mut h,vec![]);
+    assert!(text_center(&out,"保存修改").is_some(),"编辑时保存按钮应变成保存修改");
+    click(&mut h,text_center(&out,"保存修改").unwrap());
+    assert_eq!(h.app.notes.board.items.len(),1,"编辑不应新增一条");
+    assert_eq!(h.app.notes.board.items[0].text,"买牛奶、鸡蛋和咖啡");
+    assert_eq!(h.app.notes.editing,None);
+    assert!(h.app.notes.input.is_empty());
+    // 列表预览最多两行，超出部分用省略号。
+    h.app.notes.board.items[0].text="长".repeat(400);
+    let (out,_)=draw(&mut h,vec![]);
+    let preview=out.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t) if t.galley.text().chars().count()==400=>Some(t),_=>None}).expect("应画出长便签");
+    assert!(preview.galley.rows.len()<=2 && preview.galley.elided,"便签预览最多两行：rows={}",preview.galley.rows.len());
+    // 删除需要二次确认。
+    let (out,_)=draw(&mut h,vec![]);
+    click(&mut h,text_center(&out,"删除").unwrap());
+    let (out,_)=draw(&mut h,vec![]);
+    assert!(text_center(&out,"确认删除").is_some(),"第一次点删除应变成确认删除");
+    assert_eq!(h.app.notes.board.items.len(),1);
+    click(&mut h,text_center(&out,"确认删除").unwrap());
+    assert!(h.app.notes.board.items.is_empty(),"第二次点删除才移除便签");
+    let (out,_)=draw(&mut h,vec![]);
+    assert!(text_center(&out,"还没有便签").is_some(),"列表清空后应给出空状态");
+    // 便签窗口跟随皮肤：奶油皮肤下整张卡片变成暖白底。
+    h.app.settings.skin=crate::model::Skin::Cream;
+    let (out,_)=draw(&mut h,vec![]);
+    let light=out.shapes.iter().any(|s|match &s.shape{
+        egui::Shape::Rect(r) => (r.rect.width()-crate::notes_ui::WIDTH).abs()<1.5 && (r.rect.height()-crate::notes_ui::HEIGHT).abs()<1.5 && r.fill.a()>240 && r.fill.r()>200 && r.fill.g()>180,
+        _=>false,
+    });
+    assert!(light,"奶油皮肤下便签窗口应变成浅色");
+    h.app.settings.skin=crate::model::Skin::Classic;
+    let (out,_)=draw(&mut h,vec![]);
+    let (_,close)=click(&mut h,text_center(&out,"×").unwrap());
+    assert!(close,"关闭按钮应请求关窗");
 }
 
 #[test]

@@ -746,7 +746,7 @@ pub struct App {
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
-    pub(crate) translate: crate::translate_ui::State,
+    pub(crate) notes: crate::notes_ui::State,
     /// 系统监控快照（后台服务线程推送）。
     pub(crate) sysmon: crate::sysmon::Snapshot,
     /// 通知摘要计数（按 NotifyApp::ALL 顺序；静音/免打扰时累加）。
@@ -854,7 +854,7 @@ impl App {
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
-            translate: crate::translate_ui::State::load(),
+            notes: crate::notes_ui::State::load(),
             sysmon: crate::sysmon::Snapshot::default(),
             notify_digest_counts: [0; 6],
             updates: Default::default(),
@@ -1608,10 +1608,18 @@ impl App {
             )
         });
         if !dropped.is_empty() && self.settings.visible_pages[3] {
+            // 文件进岛：先切回「置物架」分栏，落进去的文件才看得见。
+            self.shelf_tab = 0;
+            self.confirm_clear = None;
+            self.clip_confirm_clear = None;
             self.on_drop(dropped);
             self.show_page(3);
         } else if hovering_files && !self.drag_hot {
             self.drag_hot = true;
+            // 拖着文件进入岛体时立刻切到「置物架」分栏，不等页面动画。
+            self.shelf_tab = 0;
+            self.confirm_clear = None;
+            self.clip_confirm_clear = None;
             if self.page != 3 {
                 self.drag_saved = Some(self.page);
                 self.go(3, if self.page < 3 { 1.0 } else { -1.0 });
@@ -2540,7 +2548,7 @@ impl App {
             0 | CALENDAR_PAGE => return,
             1 => ("番茄", "专注", theme::RED_TOP),
             2 => ("饮水", "提醒", theme::BLUE),
-            // 置物架的标题就是「置物架 | 剪贴板」分栏，由页面自己画。
+            // 置物架的标题就是「剪贴板 | 置物架」分栏，由页面自己画。
             3 => return,
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),

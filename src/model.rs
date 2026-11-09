@@ -242,9 +242,8 @@ pub struct Settings {
     pub clipboard_history: bool,
     /// 剪贴板历史保留的未固定条目上限。
     pub clipboard_max_recent: u32,
-    /// 快捷翻译：全局快捷键总开关与默认译向。
-    pub translate_enabled: bool,
-    pub translate_direction: crate::translate::Direction,
+    /// 便签：Alt+C 全局快捷键总开关。
+    pub notes_enabled: bool,
     /// 系统监控：总开关、收起态 HUD，以及 HUD 上显示哪几个读数（CPU / 内存 / GPU，顺序同 `sysmon::METRICS`）。
     pub sysmon_enabled: bool,
     pub sysmon_hud: bool,
@@ -259,7 +258,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, dingtalk_notifications:true, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, clipboard_max_recent: 30, translate_enabled: true, translate_direction: Default::default(), sysmon_enabled: true, sysmon_hud: true, sysmon_metrics: [true; 3], dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, dingtalk_notifications:true, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, clipboard_max_recent: 30, notes_enabled: true, sysmon_enabled: true, sysmon_hud: true, sysmon_metrics: [true; 3], dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
     }
 }
 
@@ -363,8 +362,7 @@ impl Settings {
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
                 "clipboard_history" => s.clipboard_history = v != "0",
                 "clipboard_max_recent" => s.clipboard_max_recent = v.parse::<u32>().unwrap_or(30).clamp(5, 200),
-                "translate_enabled" => s.translate_enabled = v != "0",
-                "translate_direction" => s.translate_direction = crate::translate::Direction::parse(&v),
+                "notes_enabled" => s.notes_enabled = v != "0",
                 "sysmon_enabled" => s.sysmon_enabled = v != "0",
                 "sysmon_hud" => s.sysmon_hud = v != "0",
                 "sysmon_metrics" => s.sysmon_metrics = parse_metrics(&v),
@@ -447,8 +445,7 @@ impl Settings {
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
                 ("clipboard_history".into(), (self.clipboard_history as u8).to_string()),
                 ("clipboard_max_recent".into(), self.clipboard_max_recent.to_string()),
-                ("translate_enabled".into(), (self.translate_enabled as u8).to_string()),
-                ("translate_direction".into(), self.translate_direction.key().into()),
+                ("notes_enabled".into(), (self.notes_enabled as u8).to_string()),
                 ("sysmon_enabled".into(), (self.sysmon_enabled as u8).to_string()),
                 ("sysmon_hud".into(), (self.sysmon_hud as u8).to_string()),
                 ("sysmon_metrics".into(), crate::sysmon::METRICS.iter().zip(self.sysmon_metrics).filter(|(_,on)|*on).map(|(key,_)|*key).collect::<Vec<_>>().join(",")),

@@ -643,7 +643,7 @@ impl eframe::App for Shell {
         #[cfg(windows)] let autostart = self.autostart;
         #[cfg(not(windows))] let autostart = false;
         self.app.settings_ui(ctx, autostart);
-        self.app.translate_ui(ctx);
+        self.app.notes_ui(ctx);
         self.app.mail_reader_ui(ctx);
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;

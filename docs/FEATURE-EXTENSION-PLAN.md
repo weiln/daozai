@@ -215,6 +215,8 @@ struct ModelUsageResult { rows: Vec<ModelUsageRow>, entries, incomplete_provider
 
 ### P0-3 快捷翻译（全局快捷键）
 
+> 已下线：该功能在 v0.7.x 中被「便签」取代（`src/notes.rs` / `src/notes_ui.rs`），`Alt+C` 现在唤起便签窗口；本节的翻译后端与密钥设计不再适用，仅作历史记录保留。
+
 **目标**：全局快捷键唤起独立翻译窗口（中英自动识别/中译英/英译中），Tab 一键填入最新剪贴板，译后一键复制。后端复用 DeepSeek API，密钥存 Windows 凭据管理器。
 
 **参考**：fly-island `translation.rs` 全流程（`RegisterHotKey MOD_NOREPEAT` + `WM_HOTKEY` 消息窗口线程；keyring；DeepSeek chat completions）。
