@@ -27,7 +27,7 @@
 | 剪贴板 | 仅文字；`AddClipboardFormatListener` 事件驱动；密码管理器标记自动排除；`clipboard.json` | `src/clipboard.rs` |
 | 系统采样 | `system::observe()` 后台线程 → `Observation` 通道（电源/网络/输入法/音量/蓝牙） | `src/system.rs:26-70` |
 | 凭据存储 | `keyring`（`windows-native`）已在依赖中（邮件 IMAP 用） | `Cargo.toml:101` |
-| AI 额度 | 8 个 Provider（Codex/Claude/Kimi/GrokBot/Gemini/ZCode/WorkBuddy/DeepSeek）本地凭据发现 + 联网查余额 | `src/quota.rs`，`src/quota_ui.rs` |
+| AI 额度 | 9 个 Provider（Codex/Claude/Kimi/GrokBot/Gemini/ZCode/WorkBuddy/Trae CN/DeepSeek）本地凭据发现 + 联网查余额 | `src/quota.rs`，`src/quota_ui.rs` |
 | 收起态 | `BAR_W=163×30` 药丸，或极简 `44×4.5`；岛体边缘渲染 HUD | `src/app.rs:27-41` |
 
 ### 0.2 页面/可见性约束（重要）

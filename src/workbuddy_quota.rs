@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{io::Read,sync::mpsc,time::Duration};
 #[derive(Clone,Debug)]
 #[derive(serde::Serialize,serde::Deserialize)]
-pub struct Credits {pub remaining:f64,pub packages:Vec<(String,f64)>}
+pub struct Credits {pub remaining:f64,pub packages:Vec<(String,f64)>,#[serde(default)] pub cycle:String}
 impl Credits {
     pub fn compact(&self)->String{super::deepseek::Balance{currency:"CNY".into(),total:self.remaining,granted:0.0,topped_up:0.0}.compact().trim_start_matches('¥').to_owned()}
     pub fn full(&self)->String{let text=super::deepseek::Balance{currency:"CNY".into(),total:self.remaining,granted:0.0,topped_up:0.0}.full(self.remaining);text.trim_start_matches('¥').trim_end_matches('0').trim_end_matches('.').to_owned()}
@@ -24,7 +24,7 @@ pub fn parse(value:&Value)->Result<Snapshot,String>{
             if let Some(amount)=group["CycleRemainCapacity"].as_f64().or_else(||group["CycleRemainCapacity"].as_str().and_then(|s|s.parse::<f64>().ok())).filter(|n|n.is_finite()&&*n>0.0){packages.push((label.into(),amount));}
         }
     }else{packages.clear();}
-    Ok(Snapshot{plan:data["SubscriptionPackageName"].as_str().unwrap_or_default().into(),credits:Some(Credits{remaining,packages}),at:chrono::Utc::now().timestamp(),..Default::default()})
+    Ok(Snapshot{plan:data["SubscriptionPackageName"].as_str().unwrap_or_default().into(),credits:Some(Credits{remaining,packages,cycle:String::new()}),at:chrono::Utc::now().timestamp(),..Default::default()})
 }
 fn valid_origin(origin:&str)->bool{matches!(origin,"https://www.codebuddy.cn"|"https://www.workbuddy.cn")}
 fn slot(uid:&str)->String{ring::digest::digest(&ring::digest::SHA256,uid.as_bytes()).as_ref().iter().map(|b|format!("{b:02x}")).collect()}

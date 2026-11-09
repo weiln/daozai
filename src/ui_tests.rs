@@ -1930,6 +1930,7 @@ fn quota_update_status_is_visible_for_every_provider_and_keeps_failed_data(){
         let mut snapshot=match provider{
             Provider::DeepSeek=>crate::quota::parse(provider,&serde_json::json!({"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"4.18","granted_balance":"0","topped_up_balance":"4.18"}]})).unwrap(),
             Provider::WorkBuddy=>crate::quota::parse(provider,&serde_json::json!({"code":0,"data":{"Packages":[{"CycleRemainCapacity":"2000"}]}})).unwrap(),
+            Provider::TraeCN=>crate::quota::parse(provider,&serde_json::json!({"usage_summary":{"consumed_amount":171.77,"total_amount":3100},"user_entitlement_pack_list":[{"display_desc":"免费","status":1,"expire_time":1900000000}]})).unwrap(),
             _=>Snapshot{windows:vec![Window{label:"5 小时".into(),seconds:Some(18000),remaining:72.0,reset:None},Window{label:"本周".into(),seconds:Some(604800),remaining:44.0,reset:None}],..Default::default()},
         };
         snapshot.at=at;h.app.quota_event(Event{id:"preview-0".into(),result:Ok(snapshot)});
@@ -5811,6 +5812,34 @@ fn workbuddy_balance_gallery(){
     }}}
 }
 #[test]
+#[ignore = "按需导出 Trae CN 积分界面"]
+fn trae_balance_gallery(){
+    use crate::quota::{Provider,Event};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_TRAE_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    for skin in [crate::model::Skin::Classic,crate::model::Skin::Cream,crate::model::Skin::GlassLight,crate::model::Skin::GlassDark]{
+    for open in [false,true]{
+        let mut h=H::new();h.app.settings.pet=false;h.app.settings.skin=skin;h.quota_accounts(2);
+        let id=h.app.quota.config.connect_trae("preview".into(),"Trae CN".into());
+        let snapshot=crate::quota::parse(Provider::TraeCN,&serde_json::json!({"is_credits_billing":true,"usage_summary":{"consumed_amount":194.44,"total_amount":3100},"user_entitlement_pack_list":[{"display_desc":"免费","status":1,"expire_time":chrono::Utc::now().timestamp()+86400*31}]})).unwrap();
+        h.app.quota_event(Event{id,result:Ok(snapshot)});
+        if open{h.app.show_page(6);}
+        let mut raster=crate::preview_raster::Raster::new(1280,380);
+        for frame in 0..90{
+            let t=frame as f64/60.0;let env=Env{t,clock:"09:41:00".into(),battery:Some(80),charging:true,cursor:if open{Some(Pos2::new(320.0,60.0))}else{None},..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(640.0,190.0))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{h.app.frame(ui,ui.max_rect(),&env);});});
+            raster.update_textures(&output.textures_delta);
+            if frame==89{
+                raster.buf.fill([0.09,0.11,0.18,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                image::save_buffer(dest.join(format!("{}-{}.png",skin.key(),if open{"open"}else{"closed"})),&rgba,1280,380,image::ColorType::Rgba8).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    }}
+}
+
+#[test]
 fn new_mail_notification_masks_codes_in_sender_and_history(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.mail.accounts=vec![crate::mail::Account{email:"a@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true}];
@@ -6504,6 +6533,22 @@ fn mail_sync_switch_defaults_off_and_persists(){
     assert!(!crate::model::Settings::default().mail_sync_operations);
     h.app.settings.mail_sync_operations=true;h.app.settings.save();assert!(crate::model::Settings::load().mail_sync_operations);
     h.app.settings.mail_sync_operations=false;h.app.settings.save();assert!(!crate::model::Settings::load().mail_sync_operations);
+}
+
+#[test]
+fn trae_connection_window_offers_browser_and_manual_token(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.quota.provider=crate::quota::Provider::TraeCN;h.app.quota.connect_open=true;
+    for _ in 0..4{
+        h.t+=1.0/60.0;
+        let output=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(640.0,760.0))),time:Some(h.t),..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|h.app.quota_settings(ui));});
+        h.shapes=output.shapes;
+    }
+    for phrase in ["从浏览器读取令牌","手动填写令牌","打开 Trae 控制台","读取 Trae CN 网页控制台"]{
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"连接窗口应提供：{phrase}");
+    }
+    assert!(h.app.quota.trae_connecting.is_none()&&h.app.quota.trae_token.is_empty());
 }
 
 #[test]
