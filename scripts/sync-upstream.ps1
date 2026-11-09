@@ -8,7 +8,7 @@
 
 分支约定：
   main  = 纯上游镜像，只做 fast-forward，绝不在这上面提交
-  mine  = 你的功能分支，7 个自定义提交都在这里，永远 rebase 到 main
+  mine  = 你的功能分支，所有自定义提交都在这里，永远 rebase 到 upstream/main
 #>
 param(
     [switch]$Check,
