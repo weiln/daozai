@@ -28,6 +28,15 @@ Write-Host "==> 拉取上游..." -ForegroundColor Cyan
 git fetch upstream --prune
 if ($LASTEXITCODE -ne 0) { Fail "拉取失败，检查网络或代理（github.com 直连超时是本机已知问题）" }
 
+# 前置守卫：main 必须是上游的纯镜像。被污染时 --ff-only 必然失败，早停比半路出错好。
+$mainDrift = [int](git rev-list --count upstream/main..main)
+git merge-base --is-ancestor main upstream/main
+$mainIsAncestor = ($LASTEXITCODE -eq 0)
+Write-Host "    守卫: main 上有上游没有的提交 $mainDrift 个，可快进: $mainIsAncestor"
+if ($mainDrift -ne 0 -or -not $mainIsAncestor) {
+    Fail "main 不是上游的纯镜像：main 上有 $mainDrift 个上游没有的提交。请先备份，把这些提交挪回 mine（cherry-pick / rebase），再 git checkout main 并 git reset --hard upstream/main，然后重跑本脚本"
+}
+
 $behind = [int](git rev-list --count mine..upstream/main)
 $ahead  = [int](git rev-list --count upstream/main..mine)
 

@@ -57,7 +57,7 @@ backup/*        动手前的安全快照，出问题随时回退
 
 **铁律**
 
-1. `main` 上永远不留自己的提交。一旦留了，上游再更新就无法 `--ff-only`。
+1. `main` 上永远不留自己的提交。一旦留了，上游再更新就无法 `--ff-only`。脚本已把它做成前置断言：main 领先上游 > 0 会直接报错停下，不再等到 ff 那一步才失败。
 2. 同步只用 `git fetch upstream && git rebase upstream/main`，
    **不要用 GitHub 网页的 "Sync fork" 按钮**，它会绕过本地历史直接改 `origin/main`。
 3. 动手前先建备份：`git branch backup/<日期>-before-sync` + `git tag backup-<日期>`。
@@ -199,7 +199,7 @@ rebase 时删旧块**连带删掉了同区块里的 `trace`/`describe`/`describe
 
 ```
 [ ] git branch backup/<日期>-before-sync && git tag backup-<日期>
-[ ] .\scripts\sync-upstream.ps1 -Check      # 看上游有多少新提交
+[ ] .\scripts\sync-upstream.ps1 -Check      # 看守卫结果 + 上游有多少新提交
 [ ] .\scripts\sync-upstream.ps1            # 冲突就手工解，解完 --continue
 [ ] 任何一处冲突拿不准 → 立刻停下来问（见第零节），不要猜
 [ ] cargo check --locked --all-targets --features record
