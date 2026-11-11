@@ -176,6 +176,8 @@ named!(capability_data<Vec<Capability>>, map_res!(
     do_parse!(
         tag_no_case!("CAPABILITY") >>
         capabilities: many0!(preceded!(char!(' '), capability)) >>
+        // Tencent Exmail appends spaces before the response terminator.
+        take_while!(|b| b == b' ') >>
         (capabilities)
     ),
     ensure_capabilities_contains_imap4rev

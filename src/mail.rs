@@ -1368,6 +1368,32 @@ mod service {
 
     /// 显式运行的真实邮箱只读检查；不输出地址、凭据或邮件内容。
     #[test]
+    fn exmail_capability_trailing_spaces_preserve_following_response() {
+        let response=b"* CAPABILITY IMAP4 IMAP4rev1 XLIST MOVE IDLE XAPPLEPUSHSERVICE NAMESPACE CHILDREN ID UIDPLUS \r\na2 OK capabilities\r\n";
+        let (rest,parsed)=imap_proto::parse_response(response).unwrap();
+        assert!(matches!(parsed,imap_proto::Response::Capabilities(caps) if caps.iter().any(|c|matches!(c,imap_proto::Capability::Atom("IDLE")))));
+        assert_eq!(rest,b"a2 OK capabilities\r\n");
+        assert!(imap_proto::parse_response(b"* CAPABILITY IDLE \r\n").is_err(),"仍需校验 IMAP4rev1");
+    }
+
+    #[test]
+    #[ignore="本机腾讯企业邮箱只读连接诊断；不输出凭据或邮件内容"]
+    fn exmail_live_capability_probe() {
+        let account=load_accounts().into_iter().find(|a|a.enabled && a.custom.as_ref().is_some_and(|c|c.host=="imap.exmail.qq.com")).expect("未配置腾讯企业邮箱");
+        let password=secrets::load(&account.credential_key()).expect("无法读取本机凭据");
+        let mut session=net::connect(&account,&password).expect("登录失败");
+        session.examine("INBOX").expect("只读打开失败");
+        let (tx,rx)=std::sync::mpsc::channel();
+        recent(&mut session,&account,&tx).expect("最近邮件读取失败");
+        drop(rx);
+        match session.capabilities(){
+            Ok(caps)=>println!("capabilities=ok idle={}",caps.has_str("IDLE")),
+            Err(error)=>panic!("capabilities_error={error:?}"),
+        }
+        let _=session.logout();
+    }
+
+    #[test]
     #[ignore = "需要本机已连接的 QQ 邮箱，显式执行只读实测"]
     fn qq_live_read_only_probe() {
         let accounts=load_accounts();

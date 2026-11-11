@@ -7,6 +7,9 @@
 - `vendor/eframe`：基于 0.31.1，处理 Windows WGL 上下文复用、岛体缩放和窗口焦点。
 - `vendor/egui`：基于 0.31.1，为不同缩放倍率维护独立的字体纹理。
 - `vendor/imap`：基于 2.4.1，关闭 `nom` 默认功能并保留 `std`，移除邮件协议解析不需要的 `lexical-core` 浮点解析依赖。服务器拒绝进入 IDLE 时直接回到轮询。
+- `vendor/ureq`：基于 2.12.1。HTTP 代理的明文请求保持 absolute-form，HTTPS 的 CONNECT 隧道内改用 origin-form。原 MIT 与 Apache-2.0 许可证随源码保留。
+
+- `vendor/imap-proto`：兼容腾讯企业邮箱 CAPABILITY 响应末尾的空格，保留 IMAP4rev1 校验和下一条响应边界。
 
 ## 安全检查
 

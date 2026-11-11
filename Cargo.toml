@@ -29,6 +29,7 @@ imap = { path = "vendor/imap" }
 imap-proto = { path = "vendor/imap-proto" }
 eframe = { path = "vendor/eframe" }
 egui = { path = "vendor/egui" }
+ureq = { path = "vendor/ureq" }
 
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "wgpu", "default_fonts"] }
