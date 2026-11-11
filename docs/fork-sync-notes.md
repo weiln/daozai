@@ -3,6 +3,10 @@
 本文件记录 2026-11 首次把上游 `Renly1994/xiaotang-daozai` 的 v0.6.63（`39413b3`）
 合入本 fork 时的实际问题、根因和教训。下次同步前**先读这份**，能省下大部分时间。
 
+> **配套文档**：[merge-history.md](merge-history.md) —— 按时间顺序的完整操作流水、
+> 分支演化、每个 commit 的来龙去脉、以及 `rebase --onto` 弄丢提交的重大失误复盘。
+> 两份一起读：这份回答"该怎么做"，那份回答"上次是怎么做的"。
+
 ---
 
 ## 零、最高优先级规则：拿不准就停下来问
@@ -61,7 +65,10 @@ backup/*        动手前的安全快照，出问题随时回退
 2. 同步只用 `git fetch upstream && git rebase upstream/main`，
    **不要用 GitHub 网页的 "Sync fork" 按钮**，它会绕过本地历史直接改 `origin/main`。
 3. 动手前先建备份：`git branch backup/<日期>-before-sync` + `git tag backup-<日期>`。
-4. 日常同步走 `scripts/sync-upstream.ps1`：
+4. `mine` 目前**不是纯线性**（含 merge commit `96b4044`，来自 2026-11-11 合入 PR #94/#95）。
+   不要贸然 `rebase --onto` 线性化——那正是弄丢 `427095d` 的原因，详见 [merge-history.md](merge-history.md) 第九节。
+5. 用 `merge` 还是 `rebase` 合上游，**先问再定**，不要自己选。
+6. 日常同步走 `scripts/sync-upstream.ps1`：
    - `-Check` 只看有没有新提交
    - 默认 fetch → main 快进 → mine rebase → cargo check
    - 冲突时脚本停在第 2 步之前并打印处理步骤，不会静默失败
@@ -79,6 +86,30 @@ backup/*        动手前的安全快照，出问题随时回退
 - 网络恢复后会间歇性抖动，`fetch` 返回 0 但没写进 refs：
   **看到"成功"要用 `git rev-parse upstream/main` / `git ls-remote` 再确认一次**
 - CI / 脚本里遇到失败，直接重试，不要急着改配置
+
+### 1.1 阻断期间的推送：探测通过才推
+
+不要盲目 `git push` 连打，先用 curl 探测，通了再推：
+
+```powershell
+for ($i = 1; $i -le 120; $i++) {
+  $code = curl.exe -s -o NUL -w "%{http_code}" --max-time 8 https://github.com/
+  if ($code -eq "200" -or $code -eq "301" -or $code -eq "302") {
+    git push origin main
+    if ($LASTEXITCODE -eq 0) { break }
+  }
+  Start-Sleep -Seconds 15
+}
+```
+
+2026-11-11 实测：前 14 轮 `http=000`，第 15 轮恢复后一次推成。
+
+**判断推送成功的依据**（不要被假报错误导）：
+
+- ✅ 看 `$LASTEXITCODE -eq 0` 和 git 输出里的 `b4f58a9..f046d6c  main -> main`
+- ❌ 不要看 PowerShell 的 `NativeCommandError`——git 把 `To https://...` 写到 stderr，
+  配合 `2>&1` 必然触发，**这是假报错**
+- 推完再跑 `git ls-remote` 可能因网络再次抖动而超时，**不代表推送失败**，以本地 `origin/main` ref 为准
 
 ### 2. cargo 不在 PATH
 
