@@ -13,23 +13,23 @@ use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
 /// 侧边停靠时的透明画布（窗口）大小，逻辑点。展开面板宽度为 `PW = 419×LAYOUT_SCALE`，
 /// 画布须容纳它并留出阴影余量。
-pub const SIDE_W: f32 = 500.0 * crate::app::LAYOUT_SCALE;
-pub const SIDE_H: f32 = 600.0 * crate::app::LAYOUT_SCALE;
+pub const SIDE_W: f32 = 500.0 * 1.0;
+pub const SIDE_H: f32 = 600.0 * 1.0;
 /// 收起时竖向胶囊的厚度。
 pub const SIDE_BAR_W: f32 = 36.0;
 /// 岛体中心能离开屏幕竖直中线的预留：展开面板与肩部、阴影留在屏幕内。
-pub const SIDE_HALF_EXTENT: f32 = 150.0 * crate::app::LAYOUT_SCALE;
+pub const SIDE_HALF_EXTENT: f32 = 150.0 * 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SideItem {
-    Clock, Battery, Music, Focus, Bell,
+    Clock, Weather, Battery, Music, Focus, Bell,
     /// AI 额度：账号下标（None 为「+N」）与高度。
     Quota(usize, f32),
 }
 
 impl SideItem {
     fn height(self) -> f32 {
-        match self { Self::Clock => 32.0, Self::Battery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
+        match self { Self::Clock => 32.0, Self::Weather => 40.0, Self::Battery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
     }
 }
 
@@ -40,6 +40,7 @@ impl App {
     /// 竖向胶囊里依次显示的内容。
     pub(crate) fn side_items(&self) -> Vec<SideItem> {
         let mut items = vec![SideItem::Clock];
+        if self.weather_pill().is_some() {items.push(SideItem::Weather);}
         if self.settings.show_battery && self.resident_power.0.is_some() { items.push(SideItem::Battery); }
         if self.media.is_music() { items.push(SideItem::Music); }
         if self.pomo.running { items.push(SideItem::Focus); }
@@ -128,6 +129,7 @@ impl App {
                     c.text(cx, mid - 1.0, &hour, 13.5, W::Bold, theme::WHITE, H::Center);
                     c.text(cx, mid + 13.0, &minute, 13.5, W::Bold, theme::WHITE, H::Center);
                 }
+                SideItem::Weather => self.draw_side_weather(c,cx,mid),
                 SideItem::Battery => paint::battery(c, cx, mid, env.battery, env.charging, 0.72),
                 SideItem::Music => paint::playback_bars(c, cx, mid, self.t, self.media.playing, theme::WHITE),
                 SideItem::Focus => {

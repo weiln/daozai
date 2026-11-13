@@ -3,7 +3,18 @@
 pub struct Bounds { pub left:i32, pub top:i32, pub right:i32, pub bottom:i32 }
 
 #[derive(Clone, Debug)]
-pub struct Display { pub id:String, pub label:String, pub bounds:Bounds, pub primary:bool }
+pub struct Display { pub id:String, pub label:String, pub bounds:Bounds,
+    /// 工作区顶边：顶栏类软件或置顶的任务栏登记后会比 `bounds.top` 更靠下。
+    pub work_top:i32, pub primary:bool }
+
+/// 岛体摆放用的屏幕范围：开启「避开顶栏」时顶边换成工作区顶边。
+/// 只认屏幕上方三分之一以内的占用，异常的工作区不会把岛推到屏幕中间。
+pub fn placement_bounds(display:&Display, avoid_top_bar:bool)->Bounds {
+    let mut b=display.bounds;
+    let reserved=display.work_top-b.top;
+    if avoid_top_bar && reserved>0 && reserved<=(b.bottom-b.top)/3 {b.top=display.work_top;}
+    b
+}
 
 pub fn selected<'a>(displays:&'a [Display],id:&str)->Option<&'a Display>{
     displays.iter().find(|d|!id.is_empty()&&d.id==id)
@@ -26,7 +37,7 @@ pub fn connected()->Vec<Display>{
             let primary=info.monitorInfo.dwFlags&1!=0;
             let label=format!("显示器 {number}{} · {} × {}{}",if name.is_empty(){String::new()}else{format!(" · {name}")},r.right-r.left,r.bottom-r.top,if primary{" · 主屏"}else{""});
             let displays=&mut *(data.0 as *mut Vec<Display>);
-            displays.push(Display{id:if stable_id.is_empty(){device}else{stable_id},label,bounds:Bounds{left:r.left,top:r.top,right:r.right,bottom:r.bottom},primary});
+            displays.push(Display{id:if stable_id.is_empty(){device}else{stable_id},label,bounds:Bounds{left:r.left,top:r.top,right:r.right,bottom:r.bottom},work_top:info.monitorInfo.rcWork.top,primary});
         }
         BOOL(1)
     }
@@ -74,6 +85,28 @@ pub fn side_origin(m:Bounds, dock:crate::model::Dock, canvas:(f32,f32), half_ext
     let cy=(m.top as f64+m.bottom as f64)/2.0+travel*offset;
     let x=match dock {crate::model::Dock::Right=>m.right as f64-w,_=>m.left as f64};
     Some((x.round() as i32,(cy-h/2.0).round() as i32))
+}
+
+#[cfg(test)]
+mod top_bar_tests {
+    use super::*;
+    fn display(bounds:Bounds,work_top:i32)->Display {Display{id:"d".into(),label:"d".into(),bounds,work_top,primary:true}}
+    #[test]
+    fn avoiding_the_top_bar_starts_below_it_and_keeps_other_edges(){
+        for (m,bar) in [(Bounds{left:0,top:0,right:1920,bottom:1080},28),(Bounds{left:-2560,top:-400,right:0,bottom:1040},42)] {
+            let d=display(m,m.top+bar);
+            assert_eq!(placement_bounds(&d,true),Bounds{top:m.top+bar,..m});
+            assert_eq!(placement_bounds(&d,false),m,"关闭后回到屏幕顶边");
+            let (x,y)=island_origin_offset(placement_bounds(&d,true),640.0,1.5,0.3).unwrap();
+            assert_eq!((x,y-bar),island_origin_offset(m,640.0,1.5,0.3).unwrap(),"只下移，不改变水平位置");
+        }
+    }
+    #[test]
+    fn missing_or_unreasonable_work_areas_are_ignored(){
+        let m=Bounds{left:0,top:0,right:1920,bottom:1080};
+        for work_top in [0,-20,361,1080,2000] {assert_eq!(placement_bounds(&display(m,work_top),true),m,"{work_top}");}
+        assert_eq!(placement_bounds(&display(m,360),true).top,360);
+    }
 }
 
 #[cfg(test)]
@@ -150,8 +183,8 @@ mod tests {
         if !displays.is_empty(){assert_eq!(displays.iter().filter(|d|d.primary).count(),1);}
     }
     #[test] fn display_selection_survives_reordering_disconnect_and_reconnect(){
-        let primary=Display{id:"internal".into(),label:"内屏".into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},primary:true};
-        let external=Display{id:"external".into(),label:"外屏".into(),bounds:Bounds{left:-2560,top:-400,right:0,bottom:1040},primary:false};
+        let primary=Display{id:"internal".into(),label:"内屏".into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},work_top:0,primary:true};
+        let external=Display{id:"external".into(),label:"外屏".into(),bounds:Bounds{left:-2560,top:-400,right:0,bottom:1040},work_top:-400,primary:false};
         for displays in [vec![primary.clone(),external.clone()],vec![external.clone(),primary.clone()]] {
             assert_eq!(selected(&displays,"").unwrap().id,"internal");
             let target=selected(&displays,"external").unwrap();assert_eq!(target.id,"external");

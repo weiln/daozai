@@ -37,7 +37,6 @@ extern "system" {
     fn CloseHandle(handle:Handle)->i32;
     fn ReadProcessMemory(handle:Handle,address:usize,buffer:*mut c_void,size:usize,read:*mut usize)->i32;
     fn VirtualQueryEx(handle:Handle,address:usize,region:*mut Region,size:usize)->usize;
-    fn K32GetModuleBaseNameW(handle:Handle,module:usize,name:*mut u16,size:u32)->u32;
 }
 #[link(name="user32")]
 extern "system" {
@@ -70,9 +69,8 @@ fn current(title:&str,artist:&str)->Option<(u32,String)>{
         let text=String::from_utf16_lossy(&text[..len as usize]);
         let Some(filename)=window_filename(&text,search.title,search.artist)else{return 1;};
         let mut pid=0;GetWindowThreadProcessId(window,&mut pid);
-        let process=Process(OpenProcess(0x410,0,pid));if process.0.is_null(){return 1;}
-        let mut name=[0u16;260];let len=K32GetModuleBaseNameW(process.0,0,name.as_mut_ptr(),260);
-        if !String::from_utf16_lossy(&name[..len as usize]).eq_ignore_ascii_case("KuGou.exe"){return 1;}
+        // 标题相似的其他窗口（如浏览器）只做有限查询，不申请内存读取权限。
+        if !super::player_process::image_is(pid,"KuGou.exe"){return 1;}
         search.result=Some((pid,filename.to_owned()));0
     }
     let mut search=Search{title,artist,result:None};
@@ -81,6 +79,8 @@ fn current(title:&str,artist:&str)->Option<(u32,String)>{
 }
 
 fn read(pid:u32,filename:&str)->Option<(String,f64)>{
+    // 进程号来自缓存时可能已被复用：读取前再核对一次身份。
+    if !super::player_process::image_is(pid,"KuGou.exe"){return None;}
     let process=Process(unsafe{OpenProcess(0x410,0,pid)});if process.0.is_null(){return None;}
     let start=Instant::now();let mut address=0;let mut total=0;let mut bytes=Vec::new();
     while total<256*1024*1024 && start.elapsed()<Duration::from_secs(2) {

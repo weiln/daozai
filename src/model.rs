@@ -1,4 +1,4 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -198,8 +198,8 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 10],
-    pub page_order: [usize; 10],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
@@ -208,11 +208,12 @@ pub struct Settings {
     pub bluetooth_notifications: bool,
     pub read_notifications:bool,
     pub wechat_notifications:bool,
+    pub wecom_notifications:bool,
+    pub feishu_notifications:bool,
+    pub dingtalk_notifications:bool,
     /// 微信缩在托盘时，点提醒通过系统托盘按钮唤起微信（默认关闭）。
     pub wechat_tray_open:bool,
     pub qq_only:bool,
-    /// 钉钉新消息提醒（走 Windows 通知中心）。
-    pub dingtalk_notifications:bool,
     pub notification_preview:bool,
     pub notifications: bool,
     pub sound: bool,
@@ -220,12 +221,21 @@ pub struct Settings {
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
     pub hide_fullscreen: bool,
+    /// 顶栏类软件（含置顶的任务栏）登记占用屏幕顶部时，岛体从它的下沿开始摆放。
+    pub avoid_top_bar: bool,
     pub focus_minutes: u32,
     pub rest_minutes: u32,
     pub water_minutes: u32,
     pub serving_ml: u32,
     pub water_start: u32,
     pub water_end: u32,
+    /// 久坐提醒：连续使用电脑达到 sit_minutes 分钟后提醒起身；与喝水共用提醒时段。
+    pub sit_remind: bool,
+    pub sit_minutes: u32,
+    /// 午休免打扰：lunch_start..lunch_end（一天中的分钟数）内喝水和久坐都不提醒。
+    pub lunch_rest: bool,
+    pub lunch_start: u32,
+    pub lunch_end: u32,
     /// v0.5.5 邮件提醒：总开关、验证码高亮、轮询间隔（秒）、会议提前量（分钟）。
     pub mail_enabled: bool,
     pub mail_sync_operations:bool,
@@ -240,14 +250,20 @@ pub struct Settings {
     pub calendar_auto_sync: bool,
     /// 记录最近复制的文字（最近记录与固定条目均在本机保存）。
     pub clipboard_history: bool,
+    /// 天气页要看的城市；留空表示按网络出口自动定位。
+    pub weather_city: String,
+    /// 用户确认的具体地点；刷新时直接使用坐标，避免同名城市重新匹配。
+    pub weather_position: Option<crate::weather::Position>,
+    /// 已保存、可在岛上下拉切换的城市（不含自动定位），最多 `weather::MAX_CITIES` 个。
+    pub weather_saved: Vec<crate::weather::Position>,
+    /// 兼容渲染：用 Direct3D 12 代替 OpenGL（部分显卡的 OpenGL 驱动会崩溃或画面错乱）。重启后生效。
+    pub render_compat: bool,
+    /// 自动切换到兼容渲染的原因；手动开启时为空。
+    pub render_compat_reason: String,
     /// 剪贴板历史保留的未固定条目上限。
     pub clipboard_max_recent: u32,
     /// 便签：Alt+C 全局快捷键总开关。
     pub notes_enabled: bool,
-    /// 系统监控：总开关、收起态 HUD，以及 HUD 上显示哪几个读数（CPU / 内存 / GPU，顺序同 `sysmon::METRICS`）。
-    pub sysmon_enabled: bool,
-    pub sysmon_hud: bool,
-    pub sysmon_metrics: [bool; 3],
     /// 通知智能聚合：免打扰时段、按应用静音（顺序同 NotifyApp::ALL）、摘要折叠。
     pub dnd_enabled: bool,
     pub dnd_start: u8,
@@ -258,7 +274,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, dingtalk_notifications:true, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, clipboard_max_recent: 30, notes_enabled: true, sysmon_enabled: true, sysmon_hud: true, sysmon_metrics: [true; 3], dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new(), clipboard_max_recent: 30, notes_enabled: true, dnd_enabled: false, dnd_start: 22, dnd_end: 8, mute_apps: [false; 6], notify_digest: true }
     }
 }
 
@@ -310,15 +326,16 @@ impl Settings {
                 "resident_order" => {
                     let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
                     // 兼容旧版 6 项顺序：自动补入「系统监控」组。
-                    if let Some(order)=crate::bar_layout::normalize_order(&order){s.resident_order=order;}
+                    if crate::bar_layout::valid_order(&order){s.resident_order=order;}
                 }
                 "page_order" => {
                     if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        // 兼容旧版 8 页的顺序：未出现的新页追加到末尾。
-                        if order.len()<=10 && order.iter().all(|p|*p<10) && order.iter().collect::<std::collections::HashSet<_>>().len()==order.len() {
-                            let mut full=order;
-                            for page in 0..10 { if !full.contains(&page) { full.push(page); } }
-                            s.page_order.copy_from_slice(&full);
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
+                            s.page_order.copy_from_slice(&order);
+                        } else if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                            // 旧配置里没有天气页：接在最后，其余顺序保持不变。
+                            s.page_order[..8].copy_from_slice(&order);
+                            s.page_order[8]=8;
                         }
                     }
                 }
@@ -326,13 +343,15 @@ impl Settings {
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                // 兼容旧版 8 页：缺省的新页按旧逻辑置为可见。
-                "visible_pages" if (6..=10).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }
                 "read_notifications" => s.read_notifications=v=="1",
                 "wechat_notifications" => s.wechat_notifications=v=="1",
+                "wecom_notifications" => s.wecom_notifications=v=="1",
+                "feishu_notifications" => s.feishu_notifications=v=="1",
+                "dingtalk_notifications" => s.dingtalk_notifications=v=="1",
                 "wechat_tray_open" => s.wechat_tray_open=v=="1",
                 "qq_only" => s.qq_only=v=="1",
                 "dingtalk_notifications" => s.dingtalk_notifications=v!="0",
@@ -345,12 +364,18 @@ impl Settings {
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
+                "avoid_top_bar" => s.avoid_top_bar = v != "0",
                 "focus_minutes" => s.focus_minutes = v.parse::<u32>().unwrap_or(25).clamp(1, 180),
                 "rest_minutes" | "short_minutes" => s.rest_minutes = v.parse::<u32>().unwrap_or(5).clamp(1, 60),
                 "water_minutes" => s.water_minutes = v.parse::<u32>().unwrap_or(45).clamp(5, 180),
                 "serving_ml" => s.serving_ml = v.parse::<u32>().unwrap_or(250).clamp(50, 1000),
                 "water_start" => s.water_start = v.parse::<u32>().unwrap_or(9).min(23),
                 "water_end" => s.water_end = v.parse::<u32>().unwrap_or(22).min(24),
+                "sit_remind" => s.sit_remind = v != "0",
+                "sit_minutes" => s.sit_minutes = v.parse::<u32>().unwrap_or(60).clamp(15, 180),
+                "lunch_rest" => s.lunch_rest = v != "0",
+                "lunch_start" => s.lunch_start = v.parse::<u32>().unwrap_or(720).min(1439),
+                "lunch_end" => s.lunch_end = v.parse::<u32>().unwrap_or(810).min(1439),
                 "mail_enabled" => s.mail_enabled = v != "0",
                 "mail_sync_operations" => s.mail_sync_operations=v=="1",
                 "mail_code" => s.mail_code = v != "0",
@@ -361,22 +386,20 @@ impl Settings {
                 "calendar_prompt" => s.calendar_prompt = v != "0",
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
                 "clipboard_history" => s.clipboard_history = v != "0",
-                "clipboard_max_recent" => s.clipboard_max_recent = v.parse::<u32>().unwrap_or(30).clamp(5, 200),
-                "notes_enabled" => s.notes_enabled = v != "0",
-                "sysmon_enabled" => s.sysmon_enabled = v != "0",
-                "sysmon_hud" => s.sysmon_hud = v != "0",
-                "sysmon_metrics" => s.sysmon_metrics = parse_metrics(&v),
-                "dnd_enabled" => s.dnd_enabled = v != "0",
-                "dnd_start" => s.dnd_start = v.parse::<u8>().unwrap_or(22).min(23),
-                "dnd_end" => s.dnd_end = v.parse::<u8>().unwrap_or(8).min(24),
-                "notify_digest" => s.notify_digest = v != "0",
-                "mute_apps" if v.len() <= 6 && v.bytes().all(|b| b == b'0' || b == b'1') => {
-                    for (i, b) in v.bytes().enumerate() { s.mute_apps[i] = b == b'1'; }
-                }
+                "weather_city" => s.weather_city = v.trim().to_string(),
+                "weather_position" => s.weather_position=serde_json::from_str::<Option<crate::weather::Position>>(&v).ok().flatten().filter(|p|p.valid()),
+                "weather_saved" => s.weather_saved=serde_json::from_str::<Vec<crate::weather::Position>>(&v).unwrap_or_default().into_iter().filter(|p|p.valid()).collect(),
+                "render_compat" => s.render_compat = v == "1",
+                "render_compat_reason" => s.render_compat_reason = v.chars().filter(|c| !c.is_control()).take(200).collect(),
                 _ => {}
             }
         }
-        // 已下线页面（如原「AI 用量」）的索引沿用旧编号，这里统一清掉再兜底。
+        if !s.visible_pages.contains(&true) { s.visible_pages[0]=true; }
+        // 旧版只有一个指定城市：迁移进已保存列表，升级后下拉框里能直接看到它。
+        if let Some(position)=s.weather_position.clone().filter(|p|p.label==s.weather_city) {
+            if !s.weather_saved.contains(&position) {s.weather_saved.insert(0,position);}
+        }
+        s.weather_saved.dedup();s.weather_saved.truncate(crate::weather::MAX_CITIES);
         s.normalize_pages();
         s
     }
@@ -384,9 +407,9 @@ impl Settings {
     /// 关闭已下线页面，并保证至少有一个存在的页面可见。
     fn normalize_pages(&mut self) {
         for page in 0..self.visible_pages.len() {
-            if !crate::app::PAGES.contains(&page) { self.visible_pages[page]=false; }
+            if page>=crate::app::PAGE_NAMES.len() { self.visible_pages[page]=false; }
         }
-        if !self.visible_pages.iter().enumerate().any(|(page,on)|*on && crate::app::PAGES.contains(&page)) {
+        if !self.visible_pages.iter().enumerate().any(|(page,on)|*on && page<crate::app::PAGE_NAMES.len()) {
             self.visible_pages[0]=true;
         }
     }
@@ -416,6 +439,9 @@ impl Settings {
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
                 ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
+                ("wecom_notifications".into(),(self.wecom_notifications as u8).to_string()),
+                ("feishu_notifications".into(),(self.feishu_notifications as u8).to_string()),
+                ("dingtalk_notifications".into(),(self.dingtalk_notifications as u8).to_string()),
                 ("wechat_tray_open".into(),(self.wechat_tray_open as u8).to_string()),
                 ("qq_only".into(),(self.qq_only as u8).to_string()),
                 ("dingtalk_notifications".into(),(self.dingtalk_notifications as u8).to_string()),
@@ -428,12 +454,18 @@ impl Settings {
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
+                ("avoid_top_bar".into(), (self.avoid_top_bar as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
                 ("rest_minutes".into(), self.rest_minutes.to_string()),
                 ("water_minutes".into(), self.water_minutes.to_string()),
                 ("serving_ml".into(), self.serving_ml.to_string()),
                 ("water_start".into(), self.water_start.to_string()),
                 ("water_end".into(), self.water_end.to_string()),
+                ("sit_remind".into(), (self.sit_remind as u8).to_string()),
+                ("sit_minutes".into(), self.sit_minutes.to_string()),
+                ("lunch_rest".into(), (self.lunch_rest as u8).to_string()),
+                ("lunch_start".into(), self.lunch_start.to_string()),
+                ("lunch_end".into(), self.lunch_end.to_string()),
                 ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
                 ("mail_sync_operations".into(),(self.mail_sync_operations as u8).to_string()),
                 ("mail_code".into(), (self.mail_code as u8).to_string()),
@@ -444,11 +476,13 @@ impl Settings {
                 ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
                 ("clipboard_history".into(), (self.clipboard_history as u8).to_string()),
+                ("weather_city".into(), self.weather_city.clone()),
+                ("weather_position".into(), serde_json::to_string(&self.weather_position).unwrap()),
+                ("weather_saved".into(), serde_json::to_string(&self.weather_saved).unwrap()),
+                ("render_compat".into(), (self.render_compat as u8).to_string()),
+                ("render_compat_reason".into(), self.render_compat_reason.clone()),
                 ("clipboard_max_recent".into(), self.clipboard_max_recent.to_string()),
                 ("notes_enabled".into(), (self.notes_enabled as u8).to_string()),
-                ("sysmon_enabled".into(), (self.sysmon_enabled as u8).to_string()),
-                ("sysmon_hud".into(), (self.sysmon_hud as u8).to_string()),
-                ("sysmon_metrics".into(), crate::sysmon::METRICS.iter().zip(self.sysmon_metrics).filter(|(_,on)|*on).map(|(key,_)|*key).collect::<Vec<_>>().join(",")),
                 ("dnd_enabled".into(), (self.dnd_enabled as u8).to_string()),
                 ("dnd_start".into(), self.dnd_start.to_string()),
                 ("dnd_end".into(), self.dnd_end.to_string()),
@@ -473,19 +507,6 @@ pub struct TodoItem {
     pub reminded_on: Option<String>,
 }
 
-/// 系统监控的显示项：「c,m,g」这样的逗号串。空串或无法识别时按「全部」处理，
-/// 但三个都关掉后保存的是空串——用 "none" 表示「一个都不显示」。
-fn parse_metrics(value: &str) -> [bool; 3] {
-    let value = value.trim().to_ascii_lowercase();
-    if value == "none" { return [false; 3]; }
-    let mut out = [false; 3];
-    for part in value.split([',', ';', ' ']).filter(|p| !p.is_empty()) {
-        for (i, key) in crate::sysmon::METRICS.into_iter().enumerate() {
-            if part == key { out[i] = true; }
-        }
-    }
-    if !out.iter().any(|on| *on) { [true; 3] } else { out }
-}
 
 pub const WEEKDAY_NAMES: [&str; 7] = ["一", "二", "三", "四", "五", "六", "日"];
 pub const REPEAT_ALL: u8 = 0b111_1111;

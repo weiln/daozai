@@ -67,8 +67,10 @@ impl Playback {
         if self.media.duration>0.0{position.min(self.media.duration)}else{position}
     }
     fn metadata(&mut self,(metadata,cover):(NowPlaying,String)){
-        self.media.title=metadata.title;self.media.artist=metadata.artist;
-        self.media.album=metadata.album;self.media.duration=metadata.duration;
+        self.media.title=metadata.title;
+        if !metadata.artist.is_empty(){self.media.artist=metadata.artist;}
+        if !metadata.album.is_empty(){self.media.album=metadata.album;}
+        if metadata.duration>0.0{self.media.duration=metadata.duration;}
         self.media.source=metadata.source;self.media.playback_type=metadata.playback_type;
         if !cover.is_empty(){self.artwork_url=cover;}
     }
@@ -109,7 +111,7 @@ impl Playback {
 }
 
 #[derive(Default)]
-struct CoverCache {
+pub(super) struct CoverCache {
     url:String,image:Option<Arc<eframe::egui::ColorImage>>,
     pending:Option<mpsc::Receiver<Option<Arc<eframe::egui::ColorImage>>>>,
     retry_at:Option<Instant>,
@@ -119,7 +121,7 @@ impl CoverCache {
     fn get(&mut self,url:&str)->Option<Arc<eframe::egui::ColorImage>>{
         self.get_with(url,fetch_cover)
     }
-    fn get_with(&mut self,url:&str,load:impl FnOnce(&str)->Option<Arc<eframe::egui::ColorImage>>+Send+'static)->Option<Arc<eframe::egui::ColorImage>>{
+    pub(super) fn get_with(&mut self,url:&str,load:impl FnOnce(&str)->Option<Arc<eframe::egui::ColorImage>>+Send+'static)->Option<Arc<eframe::egui::ColorImage>>{
         // 切歌时丢弃旧请求的接收端，迟到的封面不能覆盖新歌。
         if self.url!=url{*self=Self{url:url.into(),worker:self.worker.take(),..Default::default()};}
         if self.url.is_empty(){return None;}
@@ -245,15 +247,15 @@ impl Reader {
             let replay=self.offset==0;
             self.offset=size;self.ingest(&bytes,now,replay);
         }
-        // 启动时续播可能只写歌曲 ID，按该 ID 补充本地队列里的元数据。
+        // 按歌曲 ID 补充不完整的元数据；有封面、歌名也可能仍缺少时长。
         let id=self.playback.media.song_id;
-        if id.is_some() && (!self.playback.media.is_music() || self.playback.artwork_url.is_empty()) && (self.lookup.0!=id || now.saturating_sub(self.lookup.1)>=5000){
+        if id.is_some() && (!self.playback.media.is_music() || self.playback.media.artist.is_empty() || self.playback.media.duration<=0.0 || self.playback.artwork_url.is_empty()) && (self.lookup.0!=id || now.saturating_sub(self.lookup.1)>=5000){
             let root=path.parent()?;
             // 队列文件可达 8MB：同一首歌且文件没有变化时不重复解析（这首歌本来就没有封面时会一直满足上面的条件）。
             let print=queue_fingerprint(root);
             if self.lookup.0!=id || self.queue_print!=print {
-                self.queue_print=print;
-                if let Some(metadata)=queue_track(root,id?){self.playback.metadata(metadata);}
+                if let Some(metadata)=queue_track(root,id?){self.playback.metadata(metadata);self.queue_print=print;}
+                else{self.queue_print.clear();}
             }
             self.lookup=(id,now);
         }
@@ -280,15 +282,19 @@ fn queue_fingerprint(root:&Path)->Vec<Option<(std::time::SystemTime,u64)>>{
 }
 
 fn queue_track(root:&Path,id:u64)->Option<(NowPlaying,String)>{
+    let mut partial=None;
     for (file,key) in QUEUE_FILES{
         let Some(value)=(||{
             let file=File::open(root.join("webdata/file").join(file)).ok()?;
             if file.metadata().ok()?.len()>8*1024*1024{return None;}
             serde_json::from_reader::<_,serde_json::Value>(file).ok()
         })()else{continue;};
-        if let Some(found)=value.get(key).and_then(|v|v.as_array()).and_then(|list|list.iter().filter_map(track).find(|t|t.0.song_id==Some(id))){return Some(found);}
+        if let Some(found)=value.get(key).and_then(|v|v.as_array()).and_then(|list|list.iter().filter_map(track).find(|t|t.0.song_id==Some(id))){
+            if found.0.duration>0.0{return Some(found);}
+            if partial.is_none(){partial=Some(found);}
+        }
     }
-    None
+    partial
 }
 
 fn process_id()->Option<u32>{
@@ -298,7 +304,7 @@ fn process_id()->Option<u32>{
 
 fn control_hotkey(command:super::Transport)->Option<&'static str>{
     match command {super::Transport::Toggle=>Some("play_pause_local"),super::Transport::Next=>Some("next_local"),
-        super::Transport::Prev=>Some("prev_local"),super::Transport::Seek(_)=>None}
+        super::Transport::Prev=>Some("prev_local"),super::Transport::Seek(_)|super::Transport::SetVolume(_)|super::Transport::SetMute(_)=>None}
 }
 
 pub(super) fn control(command:super::Transport){
@@ -448,6 +454,89 @@ mod tests{
         assert_eq!(reader.playback.artwork_url,"https://p1.music.126.net/resume.jpg?param=256y256");
         std::fs::remove_file(path).unwrap();std::fs::remove_file(queue.join("playingList")).unwrap();std::fs::remove_dir(&queue).unwrap();std::fs::remove_dir(dir.join("webdata")).unwrap();std::fs::remove_dir(dir).unwrap();
     }
+    struct QueueFixture {root:std::path::PathBuf,path:std::path::PathBuf}
+    impl QueueFixture {
+        fn new(case:&str)->Self{
+            let root=std::env::temp_dir().join(format!("daozai-elog-{case}-{}",std::process::id()));
+            std::fs::create_dir_all(root.join("webdata/file")).unwrap();
+            Self{path:root.join("cloudmusic.elog"),root}
+        }
+        fn queue(&self,name:&str,key:&str,tracks:serde_json::Value){
+            std::fs::write(self.root.join("webdata/file").join(name),serde_json::json!({key:tracks}).to_string()).unwrap();
+        }
+        fn log(&self,track:serde_json::Value){
+            let metadata=format!("\"playOneTrackInPlayingList\",{}",serde_json::json!({"track":track}));
+            let id=track["id"].clone();
+            std::fs::write(&self.path,encode(&(event(9,1000,&metadata)
+                +&event(9,1100,&format!("\"native播放资源load完成\",{}",serde_json::json!({"songId":id})))
+                +&event(9,1200,"\"setPlayingPosition\",80")))).unwrap();
+        }
+    }
+    impl Drop for QueueFixture {fn drop(&mut self){
+        for name in ["playingList","fmPlay"]{let _=std::fs::remove_file(self.root.join("webdata/file").join(name));}
+        let _=std::fs::remove_file(&self.path);
+        for dir in [self.root.join("webdata/file"),self.root.join("webdata"),self.root.clone()]{let _=std::fs::remove_dir(dir);}
+    }}
+    fn incomplete_track(id:u64)->serde_json::Value{
+        serde_json::json!({"id":id,"name":"已有歌名和封面","artists":[{"name":"已有歌手"}],"album":{"name":"已有专辑","picUrl":"https://p1.music.126.net/test.jpg"}})
+    }
+    #[test]
+    fn native_queue_fills_missing_duration_without_requiring_missing_cover(){
+        let files=QueueFixture::new("duration");let mut complete=incomplete_track(123);complete["duration"]=240000.into();
+        files.queue("playingList","list",serde_json::json!([complete]));files.log(incomplete_track(123));
+        let mut reader=Reader::default();let media=reader.read(&files.path,Some(9),2000).unwrap();
+        assert_eq!(media.duration,240.0,"有歌名和封面也必须补齐时长");assert_eq!(media.position,80.0);
+        assert_eq!(reader.read(&files.path,Some(9),4000).unwrap().position,82.0,"补时长不能重置播放进度");
+    }
+    #[test]
+    fn sparse_metadata_does_not_erase_known_duration_artist_or_album(){
+        let mut state=Playback::default();let mut complete=incomplete_track(123);complete["duration"]=240000.into();
+        state.media=track(&complete).unwrap().0;state.media.position=80.0;state.ready=true;
+        let sparse=serde_json::json!({"id":123,"name":"已有歌名和封面"});
+        state.line(&event(9,1000,&format!("\"playOneTrackInPlayingList\",{sparse}")),9,2000);
+        let media=state.snapshot(2000).unwrap();
+        assert_eq!(media.duration,240.0);assert_eq!(media.artist,"已有歌手");assert_eq!(media.album,"已有专辑");assert_eq!(media.position,80.0);
+        state.line(&event(9,1100,&format!("\"playOneTrackInPlayingList\",{}",incomplete_track(456))),9,3000);
+        assert_eq!(state.media.duration,0.0,"新歌曲不得继承上一首的时长");
+    }
+    #[test]
+    fn native_queue_retries_after_a_temporary_read_lock(){
+        use std::os::windows::fs::OpenOptionsExt;
+        let files=QueueFixture::new("locked");let mut complete=incomplete_track(123);complete["duration"]=240000.into();
+        files.queue("playingList","list",serde_json::json!([complete]));
+        let queue=files.root.join("webdata/file/playingList");
+        let lock=std::fs::OpenOptions::new().write(true).share_mode(2|4).open(&queue).unwrap();
+        let before=queue_fingerprint(&files.root);assert!(before[0].is_some());
+        assert!(File::open(&queue).is_err(),"测试应复现队列暂时不允许读取");
+        // 让原来的补全条件也成立，单独验证读取失败后能否重试。
+        let mut partial=incomplete_track(123);partial["album"]=serde_json::json!({});files.log(partial);
+        let mut reader=Reader::default();assert_eq!(reader.read(&files.path,Some(9),2000).unwrap().duration,0.0);
+        drop(lock);assert_eq!(before,queue_fingerprint(&files.root),"释放读取锁不会改变文件指纹");
+        assert_eq!(reader.read(&files.path,Some(9),8000).unwrap().duration,240.0,"读取失败不能永久跳过未变化的队列");
+    }
+    #[test]
+    fn native_queue_prefers_a_known_duration_and_never_uses_another_song(){
+        let files=QueueFixture::new("queues");let partial=incomplete_track(123);let mut complete=partial.clone();complete["duration"]=240000.into();
+        files.queue("playingList","list",serde_json::json!([partial]));files.queue("fmPlay","queue",serde_json::json!([complete]));files.log(incomplete_track(123));
+        let mut reader=Reader::default();assert_eq!(reader.read(&files.path,Some(9),2000).unwrap().duration,240.0,"普通队列缺少时长时还应核对 FM 队列");
+        use std::io::Write;
+        let next=format!("\"playOneTrackInPlayingList\",{}",incomplete_track(456));
+        std::fs::OpenOptions::new().append(true).open(&files.path).unwrap().write_all(&encode(&(event(9,2000,&next)
+            +&event(9,2100,"\"native播放资源load完成\",{\"songId\":456}")))).unwrap();
+        let media=reader.read(&files.path,Some(9),3000).unwrap();
+        assert_eq!(media.song_id,Some(456));assert_eq!(media.duration,0.0,"不得补入其他歌曲的时长");
+        let mut new_track=incomplete_track(456);new_track["duration"]=180000.into();
+        files.queue("playingList","list",serde_json::json!([new_track]));
+        assert_eq!(reader.read(&files.path,Some(9),9000).unwrap().duration,180.0,"队列更新后应补齐新歌曲时长");
+    }
+    #[test]
+    fn queue_duration_fill_preserves_existing_artist_album_and_cover(){
+        let files=QueueFixture::new("preserve");files.log(incomplete_track(123));
+        files.queue("playingList","list",serde_json::json!([{"id":123,"name":"已有歌名和封面","duration":240000}]));
+        let mut reader=Reader::default();let media=reader.read(&files.path,Some(9),2000).unwrap();
+        assert_eq!(media.duration,240.0);assert_eq!(media.artist,"已有歌手");assert_eq!(media.album,"已有专辑");
+        assert_eq!(reader.playback.artwork_url,"https://p1.music.126.net/test.jpg?param=256y256");
+    }
     #[test]
     #[ignore="需要本机网易云正在播放，用于验证无 SMTC 的原生数据和歌词"]
     fn live_native_netease_playback_and_lyrics(){
@@ -457,6 +546,32 @@ mod tests{
         assert!(lyrics.synced && !lyrics.lines.is_empty());println!("已获取 {} 行同步歌词",lyrics.lines.len());
         std::thread::sleep(std::time::Duration::from_secs(2));let next=reader.poll().unwrap();
         if first.playing && next.playing && first.song_id==next.song_id{assert!(next.position>first.position);}
+    }
+    #[test]
+    #[ignore="需要本机网易云已加载歌曲；短暂播放后恢复原来的暂停状态，不查询在线歌词"]
+    fn live_native_netease_duration_and_progress(){
+        let mut reader=Reader::default();let initial=reader.poll().expect("未读到网易云原生播放事件");
+        let shared=super::super::shared();let _poller=super::super::spawn_poller(shared.clone(),eframe::egui::Context::default());
+        struct RestorePause(Option<u64>);
+        impl Drop for RestorePause{fn drop(&mut self){
+            if let Some(id)=self.0{if Reader::default().poll().is_some_and(|m|m.song_id==Some(id) && m.playing){control(super::super::Transport::Toggle);}}
+        }}
+        let _restore=RestorePause(if initial.playing{None}else{initial.song_id});
+        if !initial.playing{control(super::super::Transport::Toggle);}
+        let until=Instant::now()+Duration::from_secs(12);
+        let first=loop{
+            if let Some(media)=reader.poll().filter(|m|m.playing && m.duration>0.0){break media;}
+            assert!(Instant::now()<until,"未取得有效的播放状态和时长");std::thread::sleep(Duration::from_millis(100));
+        };
+        while !shared.lock().unwrap().playing{
+            assert!(Instant::now()<until,"媒体轮询未恢复播放状态");std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_secs(2));let next=reader.poll().expect("播放记录中断");
+        assert_eq!(next.song_id,first.song_id);assert!(next.playing && next.position>first.position);
+        assert_eq!(next.duration,first.duration);
+        let selected=shared.lock().unwrap().clone();assert_eq!(selected.song_id,next.song_id);assert_eq!(selected.duration,next.duration);
+        assert!((selected.position-next.position).abs()<2.0,"合并系统媒体信息后不能丢失实际播放位置");
+        println!("网易云原生路径：时长 {:.3}s，进度 {:.3}s → {:.3}s，初始播放状态={}，歌曲 ID={:?}",first.duration,first.position,next.position,initial.playing,first.song_id);
     }
     #[test]
     #[ignore="需要本机网易云正在播放，用于验证原生封面与缓存"]

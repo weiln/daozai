@@ -11,6 +11,9 @@ pub mod poll_clock;
 pub mod resources;
 pub mod anim;
 pub mod app;
+pub mod messenger;
+pub mod child_process;
+mod settings_window;
 pub mod bt;
 pub mod calendar;
 mod calendar_ui;
@@ -22,24 +25,22 @@ pub mod icons;
 pub mod input;
 pub mod lyrics;
 pub mod mail;
+pub mod mail_format;
 mod mail_reader;
 pub mod mail_manage;
 mod mail_manage_ui;
 pub mod clipboard;
 #[cfg(windows)]
-pub mod messenger_flash;
-pub mod notify_policy;
-pub mod sysmon;
-pub mod notes;
-mod notes_ui;
 pub mod side_dock;
 mod task_picker;
 pub mod model;
+pub mod renderer;
 pub mod otp;
 pub mod quota;
 mod quota_ui;
+pub mod weather;
+mod weather_ui;
 mod pages;
-mod feature_pages;
 mod extras;
 mod pet;
 mod pet_expressions;
@@ -57,6 +58,7 @@ pub mod paint;
 pub mod shape;
 mod fluid;
 pub mod smtc;
+pub mod music_volume;
 pub mod theme;
 pub mod settings_theme;
 mod updates;
@@ -72,7 +74,7 @@ pub mod tray;
 
 /// 会改 DAOZAI_DATA_DIR 的测试共用这一把锁，避免并行用例互相改配置目录。
 #[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod ui_tests;

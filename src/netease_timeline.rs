@@ -6,7 +6,6 @@ extern "system" {
     fn OpenProcess(access:u32,inherit:i32,pid:u32)->Handle;
     fn CloseHandle(handle:Handle)->i32;
     fn ReadProcessMemory(handle:Handle,address:usize,buffer:*mut c_void,size:usize,read:*mut usize)->i32;
-    fn K32EnumProcesses(ids:*mut u32,size:u32,needed:*mut u32)->i32;
     fn K32EnumProcessModules(handle:Handle,modules:*mut usize,size:u32,needed:*mut u32)->i32;
     fn K32GetModuleBaseNameW(handle:Handle,module:usize,name:*mut u16,size:u32)->u32;
 }
@@ -66,6 +65,8 @@ fn query(kugou:bool)->Option<(f64,f64)> {
 /// 外层 None 表示进程或模块已失效，需要重新查找；内层 None 只是本轮读数无效。
 fn sample(kugou:bool,found:Found)->Option<Option<(f64,f64)>> {
     let (process,_,stamp,image_size,position_offset)=target(kugou);
+    // 进程号可能已被其他软件复用：先用有限查询权限核对身份，再申请读取权限。
+    if !super::player_process::image_is(found.pid,process){return None;}
     let p=Process(unsafe{OpenProcess(0x410,0,found.pid)});if p.0.is_null(){return None;}
     // 进程号可能被复用：每轮都核对进程名与 PE 标识（只读几个字节）。
     if !name(p.0,0).eq_ignore_ascii_case(process){return None;}
@@ -80,9 +81,9 @@ fn sample(kugou:bool,found:Found)->Option<Option<(f64,f64)>> {
 
 fn discover(kugou:bool)->Option<Found> {
     let (process,module,stamp,image_size,_)=target(kugou);
-    let mut ids=[0u32;4096];let mut needed=0;
-    if unsafe{K32EnumProcesses(ids.as_mut_ptr(),std::mem::size_of_val(&ids) as u32,&mut needed)}==0{return None;}
-    for &id in ids.iter().take(needed as usize/4) {
+    // 先从进程快照按名称筛出播放器，只向核实后的播放器申请内存读取权限。
+    for id in super::player_process::pids_named(process) {
+        if !super::player_process::image_is(id,process){continue;}
         let p=Process(unsafe{OpenProcess(0x410,0,id)});if p.0.is_null(){continue;}
         if !name(p.0,0).eq_ignore_ascii_case(process){continue;}
         let mut modules=[0usize;1024];let mut size=0;

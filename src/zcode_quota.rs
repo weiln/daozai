@@ -48,7 +48,7 @@ fn read(agent:&ureq::Agent,url:&str,auth:&str,device_mid:Option<&str>)->Result<V
     serde_json::from_reader(response.into_reader().take(1024*1024)).map_err(|_|"ZCode 用量响应无效".into())
 }
 fn success(v:&Value)->bool{ matches!(v["code"].as_i64(),Some(0|200)) || (v["code"].is_null()&&v["success"]==true) }
-fn coding(v:&Value)->Result<Snapshot,String>{
+pub(super) fn coding(v:&Value)->Result<Snapshot,String>{
     let mut snapshot=Snapshot{plan:"Coding Plan".into(),at:chrono::Utc::now().timestamp(),..Default::default()};
     for row in v["data"]["limits"].as_array().into_iter().flatten(){
         let Some(used)=super::number(&row["percentage"]).filter(|v|(0.0..=100.0).contains(v)) else{continue;};
@@ -57,7 +57,7 @@ fn coding(v:&Value)->Result<Snapshot,String>{
         let kind=row["type"].as_str().unwrap_or_default();
         let label=if kind=="TIME_LIMIT"{"工具调用".into()}else{super::cadence(seconds)};
         let reset=row["nextResetTime"].as_i64().filter(|x|*x>0).map(|x|if x>10_000_000_000{x/1000}else{x});
-        let window=Window{label,seconds,remaining:(100.0-used) as f32,reset};
+        let window=Window{label,seconds,remaining:(100.0-used) as f32,reset,amount:None};
         match kind{"TOKENS_LIMIT"|"CREDIT_LIMIT"=>snapshot.windows.push(window),"TIME_LIMIT"=>snapshot.extra.push(window),_=>{}}
     }
     if snapshot.windows.is_empty(){std::mem::swap(&mut snapshot.windows,&mut snapshot.extra);}
@@ -73,7 +73,7 @@ fn start(v:&Value)->Result<Snapshot,String>{
         let Some(left)=super::number(&bucket["remaining_units"]).filter(|n|*n>=0.0) else{continue;};
         let reset=super::number(&bucket["expires_at"]).map(|n|n as i64);
         if reset.is_some_and(|t|t<=snapshot.at){continue;}
-        snapshot.windows.push(Window{label:bucket["show_name"].as_str().filter(|s|!s.is_empty()).unwrap_or("体验额度").into(),seconds:None,remaining:(left/total*100.0).clamp(0.0,100.0) as f32,reset});
+        snapshot.windows.push(Window{label:bucket["show_name"].as_str().filter(|s|!s.is_empty()).unwrap_or("体验额度").into(),seconds:None,remaining:(left/total*100.0).clamp(0.0,100.0) as f32,reset,amount:None});
     }
     if snapshot.windows.is_empty(){return Err("当前 ZCode 账号暂无有效体验额度".into());}
     Ok(snapshot)

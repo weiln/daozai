@@ -42,8 +42,16 @@ pub(crate) fn romanized(track:&str,lyrics:&Lyrics)->bool {
 }
 
 fn negative_path(path:&std::path::Path)->std::path::PathBuf {path.with_extension("none")}
+thread_local!{static SKIP_NEGATIVE:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
+/// 用户手动点「重试」时，本线程的这次查询跳过「近期已确认没有歌词」的记录，真正重新联网。
+/// 查询结束（含提前返回）后自动恢复，不影响之后的自动查询。
+struct SkipNegative(bool);
+impl SkipNegative {fn set(on:bool)->Self {Self(SKIP_NEGATIVE.with(|skip|skip.replace(on)))}}
+impl Drop for SkipNegative {fn drop(&mut self){SKIP_NEGATIVE.with(|skip|skip.set(self.0));}}
+
 fn read_negative(path:&std::path::Path)->Option<Result<Lyrics,FetchError>> {
     use std::io::Read;
+    if SKIP_NEGATIVE.with(|skip|skip.get()){trace(||"手动重试:跳过无歌词记录".into());return None;}
     let path=negative_path(path);
     let file=std::fs::File::open(&path).ok()?;
     let meta=file.metadata().ok()?;
@@ -181,12 +189,28 @@ pub(crate) fn read_native(source:&str,track:&str,artist:&str,duration:f64)->Opti
 
 /// 返回歌词及是否仍需等待酷狗缓存；等待期间复用已有歌词，不重复访问在线服务。
 pub fn fetch_for_display(source:&str,track:&str,artist:&str,duration:f64,song_id:Option<u64>,cached:Option<Lyrics>)->Result<(Lyrics,bool),FetchError>{
+    fetch_for_display_with(source,track,artist,duration,song_id,cached,false)
+}
+
+/// `manual`：用户手动重试，跳过近期「没有歌词」的记录。网络失败仍不会被记成没有歌词。
+pub fn fetch_for_display_with(source:&str,track:&str,artist:&str,duration:f64,song_id:Option<u64>,cached:Option<Lyrics>,manual:bool)->Result<(Lyrics,bool),FetchError>{
     take_trace();
+    let _skip=SkipNegative::set(manual);
     let started=std::time::Instant::now();
     let result=(||{
         if source.to_ascii_lowercase().contains("kugou"){
             if let Some(lyrics)=kugou_cache::read(track,artist,duration){trace(||"酷狗本地:命中".into());return Ok((lyrics,false));}
             trace(||"酷狗本地:无".into());
+            return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
+        }
+        #[cfg(windows)]
+        if source.eq_ignore_ascii_case("bodian_pc.exe") {
+            if let Some(lyrics)=song_id.and_then(crate::smtc::bodian::read_lyrics){trace(||"波点本地:命中".into());return Ok((lyrics,false));}
+            return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
+        }
+        #[cfg(windows)]
+        if source.eq_ignore_ascii_case("kwmusic.exe") {
+            if let Some(lyrics)=crate::smtc::kuwo::read_lyrics(track,artist){trace(||"酷我本地:命中".into());return Ok((lyrics,false));}
             return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
         }
         fetch_for_source(source,track,artist,duration,song_id).map(|lyrics|(lyrics,false))
@@ -203,6 +227,14 @@ pub fn fetch_for_display(source:&str,track:&str,artist:&str,duration:f64,song_id
 
 /// 原生缓存优先；未缓存的新歌仍可使用已有在线来源。
 pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64,song_id:Option<u64>)->Result<Lyrics,FetchError> {
+    #[cfg(windows)]
+    if source.eq_ignore_ascii_case("kwmusic.exe") {
+        if let Some(lyrics)=crate::smtc::kuwo::read_lyrics(track,artist){trace(||"酷我本地:命中".into());return Ok(lyrics);}
+    }
+    #[cfg(windows)]
+    if source.eq_ignore_ascii_case("bodian_pc.exe") {
+        if let Some(lyrics)=song_id.and_then(crate::smtc::bodian::read_lyrics){trace(||"波点本地:命中".into());return Ok(lyrics);}
+    }
     if source.to_ascii_lowercase().contains("qqmusic") {
         let common=cache_path(track,artist,duration);
         let path=common.parent().unwrap().join("qqmusic").join(common.file_name().unwrap());
@@ -1087,6 +1119,19 @@ mod tests {
         let (lrclib,worker)=serve(vec![("200 OK","[]".into())]);
         let (result,failed)=fetch_with_sources_detail(None,None,Some(&lrclib),"Track","Artist",120.0);
         assert_eq!(result.unwrap_err(),FetchError::NotFound);assert!(!failed);worker.join().unwrap();
+    }
+
+    #[test]
+    fn manual_retry_skips_remembered_missing_lyrics_only_during_that_query(){
+        let path=std::env::temp_dir().join(format!("daozai-manual-{}-{:?}.lrc",std::process::id(),std::thread::current().id()));
+        write_negative(&path,None);
+        assert!(read_negative(&path).is_some());
+        {
+            let _skip=SkipNegative::set(true);
+            assert!(read_negative(&path).is_none(),"手动重试应跳过无歌词记录");
+        }
+        assert!(read_negative(&path).is_some(),"查询结束后恢复使用无歌词记录");
+        std::fs::remove_file(negative_path(&path)).unwrap();
     }
 
     #[test]

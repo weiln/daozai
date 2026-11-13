@@ -6,7 +6,7 @@
 
 **一座小岛，装下桌面日常。**
 
-Windows 桌面伙伴，把消息、音乐、日程和 AI 额度放到手边。
+Windows 桌面伙伴，把消息、音乐、日程、天气和 AI 额度放到手边。
 
 [![最新版本](https://img.shields.io/github/v/release/Renly1994/xiaotang-daozai?color=7955b8&label=最新版本)](https://github.com/Renly1994/xiaotang-daozai/releases/latest)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4)](#下载安装)
@@ -95,16 +95,27 @@ Windows 桌面伙伴，把消息、音乐、日程和 AI 额度放到手边。
 
 ![AI 额度面板：Codex 额度、WorkBuddy 积分与 DeepSeek 余额](docs/images/readme/ai-quota.webp)
 
-支持 **Codex、Claude、Kimi、Grok Bot、Gemini、ZCode、WorkBuddy 和 DeepSeek**。
+支持 **Codex、Claude、Kimi、Grok Bot、Gemini、ZCode、WorkBuddy、DeepSeek 和 Kiro**。
 
 订阅额度、重置时间、套餐积分与 API 余额，按服务展示。多个账号可分别命名、选择配色，常用账号直接放在收起的小岛上。
 
 - **ZCode**：查看套餐额度。
 - **Claude**：只读取桌面版本地用量历史与缓存，或接收 Claude Code 官方状态栏输出；岛仔不使用 Claude 登录令牌，也不请求 Claude 额度接口。数据随官方客户端使用更新，桌面版缓存有效时自动显示重置时间，读取不到时显示未知。
+- **Kiro**：只读识别 Kiro 登录缓存并核验用户，显示套餐、有效试用与赠送 / 加购点数及明细，超额上限单独显示；支持美国东部和欧洲中部区域。不自动续期，登录过期时请在 Kiro 中重新登录。
 - **WorkBuddy**：查看剩余积分；优先识别本机客户端登录，也可在默认浏览器完成授权。
+- **Gemini**：支持 Chrome 144+ 原生授权连接，读取官网的 5 小时与每周额度，无需扩展。先在 Chrome 登录 Gemini，首次在 `chrome://inspect/#remote-debugging` 开启连接，回岛仔点击连接并在 Chrome 允许授权；会话加密保存在本机，后续独立刷新。高级设置保留手动 Cookie 连接。
 - **DeepSeek**：使用 API Key 连接，查看账户余额、充值与赠送金额。
 
 连接方式、可用字段与账号订阅有关；请求失败或登录过期时，以对应服务的官方页面为准。
+
+## 出门前先看一眼天气
+
+天气页显示当前实况与未来四天预报：温度、天气现象、体感、湿度、风速、日出日落时间，以及每天的最高／最低温和降水概率。
+
+- 默认按当前网络出口自动定位，**设置 → 天气** 里也可以填城市名（中英文都行），或点「自动定位」清除。城市输入按回车或点「刷新天气」后生效。
+- 数据来自 **Open-Meteo**（免费、无需密钥），每 15 分钟自动更新，也可以在页面右上角手动刷新。同一城市请求间隔至少 30 秒，失败后至少 2 分钟；关闭天气模块后停止后续自动查询。
+- 结果缓存在本机：断网时继续显示上次的数据，并用橙色标出更新时间。
+- 岛收起时常驻栏会在时间后面带一个天气图标和当前温度（如 `🌧 9°`），点它直接进天气页；不想看就在页面管理里关闭天气模块，或进极简模式。
 
 ## 还有这些顺手的小功能
 
@@ -135,7 +146,7 @@ Windows 桌面伙伴，把消息、音乐、日程和 AI 额度放到手边。
 | --- | --- | --- |
 | 邮箱 | QQ、163、126、腾讯企业邮、iCloud、Gmail、自定义 IMAP | 启用 IMAP，填写授权码或 App 专用密码；自定义服务可填写服务器、端口与登录用户名 |
 | 日历 | 飞书、钉钉、企业微信、iCloud、CalDAV、Exchange ActiveSync | 服务商提供的日历同步凭据与必要的服务器地址；安装桌面客户端不等于授权 |
-| AI 额度 | Codex、Claude、Kimi、Grok Bot、Gemini、ZCode、WorkBuddy、DeepSeek | 对应客户端登录、独立授权或 API Key；具体以设置中的连接入口为准 |
+| AI 额度 | Codex、Claude、Kimi、Grok Bot、Gemini、ZCode、WorkBuddy、DeepSeek、Kiro | 对应客户端登录、独立授权或 API Key；具体以设置中的连接入口为准 |
 
 QQ 收信、邮件日程和飞书个人日历已进行真实账号测试。其他日历入口的可用性与服务端配置、权限和兼容性有关；钉钉、企业微信尚未完成本轮真实账号同步验收。
 
@@ -150,6 +161,7 @@ QQ 收信、邮件日程和飞书个人日历已进行真实账号测试。其�
 - 读取已有 AI 客户端登录时不回写原客户端配置。不要把授权码、Cookie、API Key 或登录 JSON 上传到 Issue。
 - 邮箱读取收件箱，不读取垃圾邮件文件夹；邮件正文在当前进程中用于展示和识别。
 - 岛仔没有自建的邮件或日程上传后台；开启联网功能后，会访问对应服务商与歌词服务。
+- 天气只用城市名或由定位服务给出的经纬度查询 Open-Meteo；自动定位通过 `ipwho.is` 获取大致城市，不读取账号信息。最近一次天气结果缓存在 `%APPDATA%\Daozai\weather.json`。
 
 完整说明见 [隐私与安全](docs/PRIVACY.md)。
 

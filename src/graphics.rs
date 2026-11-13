@@ -4,14 +4,23 @@
 //! 只有 Windows 自带的 OpenGL 1.1（GDI Generic），egui_glow 报「requires OpenGL 2.0+」。
 //! 这时改用 Direct3D 12 重新启动，不需要用户拔扩展坞。
 
-/// 兼容图形后端：Direct3D 12（低功耗显卡优先）。
-fn compatible(mut options:eframe::NativeOptions)->eframe::NativeOptions {
+/// 兼容图形后端（低功耗显卡优先）：指定 Direct3D 12 或 Vulkan。
+fn compatible(mut options:eframe::NativeOptions,backends:eframe::wgpu::Backends)->eframe::NativeOptions {
     options.renderer=eframe::Renderer::Wgpu;
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup)=&mut options.wgpu_options.wgpu_setup {
-        setup.instance_descriptor.backends=eframe::wgpu::Backends::DX12|eframe::wgpu::Backends::VULKAN;
+        setup.instance_descriptor.backends=backends;
         setup.power_preference=eframe::wgpu::PowerPreference::LowPower;
     }
     options
+}
+
+/// 兼容渲染优先用 Direct3D 12（Windows 原生、睡眠唤醒与换屏处理最稳）；
+/// 设备不支持时再退到 Vulkan。两者都不经过显卡的 OpenGL 驱动。
+fn launch_compatible(options:eframe::NativeOptions,launch:&mut impl FnMut(eframe::NativeOptions)->eframe::Result<()>)->eframe::Result<()> {
+    match launch(compatible(options.clone(),eframe::wgpu::Backends::DX12)) {
+        Err(eframe::Error::Wgpu(_))=>launch(compatible(options,eframe::wgpu::Backends::VULKAN)),
+        result=>result,
+    }
 }
 
 /// 验收与排障：设置环境变量 `DAOZAI_RENDERER=wgpu` 直接使用兼容图形后端，
@@ -21,15 +30,21 @@ fn forced_compatible()->bool {
 }
 
 pub fn run(mut options:eframe::NativeOptions,mut launch:impl FnMut(eframe::NativeOptions)->eframe::Result<()>)->eframe::Result<()> {
-    if forced_compatible() {return launch(compatible(options));}
+    // 上次崩在显卡 OpenGL 驱动里时，崩溃处理留下的标记会在这里转成设置。
+    let _=daozai::renderer::apply_pending_fallback();
+    if forced_compatible() || daozai::renderer::compat_requested() {
+        daozai::renderer::set_compat_active(true);
+        return launch_compatible(options,&mut launch);
+    }
     options.renderer=eframe::Renderer::Glow;
-    let fallback_options=compatible(options.clone());
+    let fallback_options=options.clone();
     let error=match launch(options) {
         Ok(())=>return Ok(()),
         Err(error @ (eframe::Error::OpenGL(_)|eframe::Error::Glutin(_)|eframe::Error::NoGlutinConfigs(..)))=>error,
         Err(error)=>return Err(error),
     };
-    launch(fallback_options).map_err(|fallback|eframe::Error::AppCreation(format!(
+    daozai::renderer::set_compat_active(true);
+    launch_compatible(fallback_options,&mut launch).map_err(|fallback|eframe::Error::AppCreation(format!(
         "OpenGL 初始化失败：{error}\n兼容图形后端也无法启动：{fallback}\n请安装电脑厂商提供的显卡驱动后重试。"
     ).into()))
 }
@@ -53,6 +68,18 @@ mod tests {
             Ok(())
         });
         assert!(result.is_ok());assert_eq!(attempts,2);
+    }
+
+    #[test]
+    fn compatible_rendering_prefers_direct3d_12_then_vulkan(){
+        let mut backends=Vec::new();
+        let result=launch_compatible(eframe::NativeOptions::default(),&mut |options|{
+            let eframe::egui_wgpu::WgpuSetup::CreateNew(setup)=options.wgpu_options.wgpu_setup else{panic!("应创建兼容图形设备")};
+            backends.push(setup.instance_descriptor.backends);
+            if backends.len()==1 {Err(eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::NoSuitableAdapterFound("测试".into())))} else {Ok(())}
+        });
+        assert!(result.is_ok());
+        assert_eq!(backends,[eframe::wgpu::Backends::DX12,eframe::wgpu::Backends::VULKAN],"先 Direct3D 12，失败再 Vulkan");
     }
 
     #[test]

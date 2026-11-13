@@ -368,14 +368,13 @@ fn transfer(input: &mut impl Read, output: &mut impl Write, package: &Package, c
 
 #[cfg(windows)]
 fn launch_installer(work: &std::path::Path) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
     let target = std::env::current_exe().map_err(|_| "无法找到当前程序")?;
     let shell = std::env::var_os("SystemRoot").map(PathBuf::from).ok_or("无法找到 Windows 目录")?
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let mut child = std::process::Command::new(shell).args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+    let mut child = crate::child_process::spawn(std::process::Command::new(shell).args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(work.join("apply.ps1")).arg("-WorkPath").arg(work).arg("-TargetExe").arg(target)
-        .arg("-ParentProcessId").arg(std::process::id().to_string()).creation_flags(0x08000000)
-        .spawn().map_err(|_| "无法启动更新程序，请通过浏览器下载安装")?;
+        .arg("-ParentProcessId").arg(std::process::id().to_string()))
+        .map_err(|_| "无法启动更新程序，请通过浏览器下载安装")?;
     // 脚本先确认缓存和安装目录可用，再允许主程序退出。
     for _ in 0..100 {
         if work.join("ready").exists() { return Ok(()); }

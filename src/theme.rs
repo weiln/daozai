@@ -17,6 +17,8 @@ pub const BLUE_DEEP: Color32 = Color32::from_rgb(13, 69, 128);
 pub const CYAN: Color32 = Color32::from_rgb(102, 219, 255);
 pub const SOFT_GREEN: Color32 = Color32::from_rgb(118, 196, 151);
 pub const GREEN: Color32 = Color32::from_rgb(48, 209, 88);
+/// 健康页「久坐」模式的主色（与喝水的蓝成对）。
+pub const SIT_GREEN: Color32 = Color32::from_rgb(70, 200, 125);
 pub const CHARGE: Color32 = Color32::from_rgb(33, 235, 84);
 pub const WHITE: Color32 = Color32::WHITE;
 pub const GRAY: Color32 = Color32::from_rgb(178, 178, 186);

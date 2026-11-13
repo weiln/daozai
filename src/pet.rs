@@ -104,6 +104,7 @@ mod tests {
         use crate::app::{App,Env,Options,WIN_W,WIN_H};
         let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_LISTENING_PREVIEW").expect("需指定预览目录"));
         std::fs::create_dir_all(&dest).unwrap();
+        let _env=crate::ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         std::env::set_var("DAOZAI_DATA_DIR",std::env::temp_dir().join(format!("daozai-listening-{}",std::process::id())));
         let ctx=egui::Context::default();let mut app=App::new(&ctx,Options{fetch_lyrics:false,pet_idle:1e9});
         app.settings.pet=true;app.settings.minimal=false;app.settings.island_lyrics=false;
